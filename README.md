@@ -87,4 +87,13 @@ claude plugin validate .
 claude plugin test .
 ```
 
-버전은 `.claude-plugin/plugin.json`의 `version`이다. 이 값을 올려야 `claude plugin update git-graph@altair-skills`가 새 코드를 받는다. 릴리스는 버전을 올린 커밋에 `v<버전>` 태그를 붙이고 Gitea 릴리스로 만든다.
+### 릴리스
+
+릴리스는 CI가 한다. 버전을 직접 올리지 않아도 된다.
+
+1. 모든 push에서 Gitea 공용 러너가 Claude Code 2.1.325로 `claude plugin validate`와 `claude plugin test`를 돌린다.
+2. main에서 시험이 통과하면 `scripts/ci-release.sh`가 다음 버전을 정한다. 마지막 태그의 patch를 1 올리고, main의 `plugin.json` 버전이 마지막 태그보다 높으면(minor, major를 직접 올린 경우) 그 버전을 쓴다.
+3. 버전 커밋을 `release` 브랜치에 올리고 `v<버전>` 태그와 Gitea 릴리스를 만든다. 노트는 지난 릴리스 뒤로 main에 들어온 커밋 제목이다. main에는 CI 커밋이 들어가지 않는다.
+4. 마지막 릴리스 뒤로 `hooks/`, `types/`가 바뀌지 않았으면 릴리스하지 않는다. 문서만 바뀐 push는 CI도 돌지 않는다.
+
+설치본은 마켓플레이스가 가리키는 `release` 브랜치만 받으므로, 시험을 통과해 릴리스된 코드만 `claude plugin update git-graph@altair-skills`로 들어온다. 다음 버전을 미리 보려면 `DRY_RUN=1 scripts/ci-release.sh`를 실행한다.
