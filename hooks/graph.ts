@@ -276,7 +276,7 @@ export function buildRows(commits: Commit[], open: ReadonlySet<string>, now: num
       graph: cells(r, width, node(r, !!r.before[r.col] || (r.isHead && !!ctx.wip))),
       label: [
         ...(ctx.marks.has(`c:${r.c.h}`) ? [MARK] : []),
-        ...(r.isHead ? [{ t: 'HEAD ', color: PALETTE[r.colors[r.col]!], bold: true }] : []),
+        ...(r.isHead ? [{ t: 'HEAD ', color: PALETTE[r.colors[r.col]!], bold: true as const }] : []),
         ...chips(r.refs, PALETTE[r.colors[r.col]!], ctx.marks),
         ...(r.c.p.length > 1 ? mergeLabel(r) : [{ t: r.c.s }]),
       ],
