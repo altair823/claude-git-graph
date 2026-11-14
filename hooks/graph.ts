@@ -214,25 +214,20 @@ function passing(r: Laid, width: number, ch: string): Seg[] {
   return out
 }
 
-export function age(t: number, now: number): string {
+// 지난 시간을 가장 큰 단위로 나타낸다. 1시간이 안 되면 분 단위다.
+const UNITS = [[31557600, 'y', '년'], [2629800, 'mo', '개월'], [604800, 'w', '주'], [86400, 'd', '일'], [3600, 'h', '시간'], [60, 'm', '분']] as const
+function since(t: number, now: number) {
   const s = Math.max(0, now / 1000 - t)
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  if (s < 86400) return `${Math.floor(s / 3600)}h`
-  if (s < 604800) return `${Math.floor(s / 86400)}d`
-  if (s < 2629800) return `${Math.floor(s / 604800)}w`
-  if (s < 31557600) return `${Math.floor(s / 2629800)}mo`
-  return `${Math.floor(s / 31557600)}y`
+  const u = UNITS.find(([sec]) => s >= sec) ?? UNITS[5]
+  return { s, n: Math.floor(s / u[0]), short: u[1], long: u[2] }
 }
-
-export function ageLong(t: number, now: number): string {
-  const s = Math.max(0, now / 1000 - t)
-  if (s < 60) return '방금'
-  if (s < 3600) return `${Math.floor(s / 60)}분 전`
-  if (s < 86400) return `${Math.floor(s / 3600)}시간 전`
-  if (s < 604800) return `${Math.floor(s / 86400)}일 전`
-  if (s < 2629800) return `${Math.floor(s / 604800)}주 전`
-  if (s < 31557600) return `${Math.floor(s / 2629800)}개월 전`
-  return `${Math.floor(s / 31557600)}년 전`
+export const age = (t: number, now: number) => {
+  const { n, short } = since(t, now)
+  return `${n}${short}`
+}
+export const ageLong = (t: number, now: number) => {
+  const { s, n, long } = since(t, now)
+  return s < 60 ? '방금' : `${n}${long} 전`
 }
 
 const MARK: Seg = { t: '✓ ', color: 'green', bold: true }
@@ -339,15 +334,33 @@ export function releases(commits: Commit[]): { tag: string; ahead: number }[] {
   })
 }
 
+// git status --branch의 첫 줄에서 브랜치와 ahead/behind를 꺼낸다. git은 브랜치 이름에 '..'를 허용하지 않으므로
+// '...' 앞까지가 브랜치 이름이다(이름에 점이 있어도 된다).
+export function statusBranch(head: string): string {
+  const m = /^## (?:No commits yet on )?(.+?)(?:\.\.\.\S+)?(?: \[([^\]]*)\])?$/.exec(head)
+  const state = m?.[2] ?? ''
+  const ahead = /ahead (\d+)/.exec(state)?.[1]
+  const behind = /behind (\d+)/.exec(state)?.[1]
+  return [m?.[1] ?? head.slice(3), ahead && `↑${ahead}`, behind && `↓${behind}`].filter(Boolean).join(' ')
+}
+
+// 고른 것 중 아직 이력에 있는 것만 남긴다(rebase나 amend로 사라진 커밋, 지워진 브랜치는 뺀다).
+export function liveMarks(marks: readonly string[], commits: Commit[]): string[] {
+  const hashes = new Set(commits.map(c => c.h))
+  const branches = new Set(commits.flatMap(c => c.refs.map(r => r.replace(/^HEAD -> /, '').replace(/^refs\/(heads|remotes)\//, ''))))
+  return marks.filter(m => (m.startsWith('c:') ? hashes.has(m.slice(2)) : branches.has(m.slice(2))))
+}
+
 // 화면에 보이는 줄들의 그래프 폭을 그 줄들에서 가장 오른쪽 선까지로 줄인다.
 export function trimGraphs(rows: Row[]): Row[] {
   const used = Math.max(0, ...rows.map(r => r.graph.reduce((n, s, i) => (s.t.trim() ? i + 1 : n), 0)))
   return rows.map(r => ({ ...r, graph: r.graph.slice(0, used) }))
 }
 
-// 터미널 칸 수. 한글과 전각 문자는 2칸이다.
+// 터미널 칸 수. 한글과 전각 문자는 2칸, 결합 문자와 폭 없는 문자는 0칸이다.
 const cw = (ch: string) => {
   const c = ch.codePointAt(0) ?? 0
+  if ((c >= 0x0300 && c <= 0x036f) || (c >= 0x200b && c <= 0x200f) || (c >= 0x20d0 && c <= 0x20ff) || (c >= 0xfe00 && c <= 0xfe0f) || (c >= 0xfe20 && c <= 0xfe2f)) return 0
   return (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3) ||
     (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) ||
     (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1f300 && c <= 0x1faff)
@@ -369,6 +382,8 @@ export function merge(segs: Seg[]): Seg[] {
 
 // 왼쪽 구간을 cols칸에 맞춰 자르고, 오른쪽 끝에 right를 붙인다.
 export function fit(left: Seg[], right: Seg[], cols: number): Seg[] {
+  // 오른쪽만으로 폭을 넘으면 오른쪽도 잘라 cols칸을 넘지 않게 한다.
+  if (right.reduce((n, s) => n + width(s.t), 0) > cols) right = fit(right, [], cols)
   const rw = right.reduce((n, s) => n + width(s.t), 0)
   const room = Math.max(0, cols - rw - (rw ? 1 : 0))
   const out: Seg[] = []
@@ -380,6 +395,8 @@ export function fit(left: Seg[], right: Seg[], cols: number): Seg[] {
       used += w
       continue
     }
+    // 말줄임표 한 칸도 남지 않으면 아무것도 넣지 않는다.
+    if (room - used < 1) break
     let t = ''
     for (const ch of s.t) {
       if (used + width(t) + cw(ch) > room - 1) break

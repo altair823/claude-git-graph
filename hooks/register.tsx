@@ -2,16 +2,17 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Detail, Repo, Track, View } from '../types'
-import { ageLong, buildRows, fit, merge, parseLog, releases, trimGraphs, width } from './graph'
+import { ageLong, buildRows, fit, liveMarks, merge, parseLog, releases, statusBranch, trimGraphs, width } from './graph'
 import type { Row, Seg } from './graph'
 
 const PANE = 'git-graph'
 const LIMIT = 500
 // 저장 형태가 바뀌면 shape 값을 올린다. 이전 버전이 저장한 값은 버려진다.
-const EMPTY: Repo = { branch: '', changes: 0, name: '', commits: [], more: false, track: {}, fetched: 0 }
-const repo = atom({ plugin: 'git-graph', key: 'repo' } as const, EMPTY, { shape: 'repo-2' })
+const EMPTY: Repo = { rev: 0, branch: '', changes: 0, name: '', commits: [], more: false, track: {}, fetched: 0 }
+const repo = atom({ plugin: 'git-graph', key: 'repo' } as const, EMPTY, { shape: 'repo-3' })
 const view = atom({ plugin: 'git-graph', key: 'view' } as const, { open: [], cur: '', off: 0, start: 0, marks: [] } as View, { shape: 'view-4' })
-const detail = atom({ plugin: 'git-graph', key: 'detail' } as const, { h: '', author: '', t: 0, s: '', files: 0, add: 0, del: 0 } as Detail, { shape: 'detail-1' })
+const NO_DETAIL: Detail = { h: '', author: '', t: 0, s: '', files: 0, add: 0, del: 0 }
+const detail = atom({ plugin: 'git-graph', key: 'detail' } as const, NO_DETAIL, { shape: 'detail-2' })
 
 const LOG = [
   'git', 'log', '--topo-order', '--decorate=full', '--no-show-signature',
@@ -20,9 +21,9 @@ const LOG = [
 ]
 // --no-optional-locks: 주기적으로 돌아도 index.lock을 잡지 않아 다른 git 작업과 충돌하지 않는다.
 const STATUS = ['git', '--no-optional-locks', 'status', '--porcelain=v1', '--branch']
-// 저장소 위치와 HEAD, 모든 브랜치와 태그가 가리키는 커밋. 둘 다 그대로면 이력도 그대로라 git log를 건너뛴다.
-// 저장소 위치, FETCH_HEAD 파일 위치(마지막 fetch 시각을 읽는다), HEAD 순서로 한 줄씩 나온다.
+// 저장소 위치, FETCH_HEAD 파일 위치(마지막 fetch 시각을 읽는다), HEAD가 한 줄씩 나온다.
 const TOP = ['git', 'rev-parse', '--show-toplevel', '--path-format=absolute', '--git-path', 'FETCH_HEAD', 'HEAD']
+// 모든 브랜치와 태그가 가리키는 커밋. TOP과 함께 그대로면 이력도 그대로라 git log를 건너뛴다.
 const REFS = ['git', 'for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/remotes', 'refs/tags']
 // 로컬 브랜치마다 upstream과 앞선 수, 뒤처진 수. ref가 바뀔 때만 읽는다.
 const TRACK = ['git', 'for-each-ref', '--format=%(refname:short)%09%(upstream:short)%09%(upstream:track,nobracket)', 'refs/heads']
@@ -41,34 +42,38 @@ function parseTrack(out: string): Record<string, Track> {
 // ponytail: 마지막으로 그린 그래프 영역의 높이. 모듈을 다시 불러오면 다음 그리기에서 다시 맞춰진다.
 let lastRows = 20
 
-
 // 마지막으로 git log를 읽었을 때의 저장소 위치, HEAD, ref 목록. 모듈을 다시 불러오면 한 번 전체를 읽는다.
 let lastRefs = ''
 
-async function load($: EngineInterface): Promise<Repo> {
-  const empty = EMPTY
+async function load($: EngineInterface, prev: Repo): Promise<Repo> {
+  // 오류로 커밋 목록이 비면 내용이 바뀐 것이므로 rev를 올린다(화면 줄 기억값이 이전 이력을 쓰지 않게).
+  const empty = { ...EMPTY, rev: prev.commits.length ? prev.rev + 1 : prev.rev }
   try {
     const [status, top, refs] = await Promise.all([$.process.run(STATUS), $.process.run(TOP), $.process.run(REFS)])
     if (status.exitCode !== 0) return { ...empty, error: 'git 저장소가 아닙니다' }
     const [head = '', ...changes] = status.stdout.split('\n').filter(Boolean)
-    const m = /^## (?:No commits yet on )?([^.\s]+)(?:\.\.\.\S+)?(?: \[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\])?/.exec(head)
-    const branch = [m?.[1] ?? head.slice(3), m?.[2] && `↑${m[2]}`, m?.[3] && `↓${m[3]}`].filter(Boolean).join(' ')
+    const branch = statusBranch(head)
     const [toplevel = '', fetchHead = ''] = top.stdout.split('\n')
     const name = toplevel.trim().split('/').pop() ?? ''
     const fetched = await $.fs.stat(fetchHead.trim()).then(st => st.mtimeMs, () => 0)
     const base = { branch, name, changes: changes.length, fetched }
+    // 두 명령이 모두 성공했을 때만 이전 이력을 재사용한다. 실패하면 ref 상태를 알 수 없으므로 다시 읽는다.
+    const cacheable = top.exitCode === 0 && refs.exitCode === 0
     const key = top.stdout + refs.stdout
-    const prev = await read($, repo)
-    if (key === lastRefs && !prev.error) return { ...prev, ...base }
+    if (cacheable && key === lastRefs && !prev.error) return { ...prev, ...base }
     const [log, track] = await Promise.all([$.process.run(LOG), $.process.run(TRACK)])
     if (log.exitCode !== 0) return { ...empty, ...base, error: log.stderr.split('\n')[0] }
-    lastRefs = key
+    lastRefs = cacheable ? key : ''
     const commits = parseLog(log.stdout)
-    return { ...base, commits, more: commits.length >= LIMIT, track: parseTrack(track.stdout) }
+    // 커밋 목록과 동기화 상태가 함께 바뀌므로 rev를 올린다. 화면 줄 기억값은 이 번호로 판단해 항상 이력과 같이 바뀐다.
+    return { ...base, rev: prev.rev + 1, commits, more: commits.length >= LIMIT, track: parseTrack(track.stdout) }
   } catch (err) {
     return { ...empty, error: `git 실행 실패: ${String(err)}` }
   }
 }
+
+// 세션 시작이 다시 일어나도(플러그인을 다시 켜거나 작업 프로세스가 다시 뜰 때) 주기 갱신 타이머가 겹치지 않게 한다.
+let ticker: { cancel: () => void } | undefined
 
 // 갱신이 겹치면 하나로 합친다. 도는 중에 다시 요청되면 끝난 뒤 한 번 더 읽어 마지막 상태를 남긴다.
 let busy = false
@@ -86,11 +91,9 @@ async function refresh($: EngineInterface) {
     do {
       again = false
       const t0 = await $.clock.now()
-      const next = await load($)
-      if (JSON.stringify(next) !== JSON.stringify(await read($, repo))) {
-        await update($, repo, () => next)
-        repoRev++
-      }
+      const prev = await read($, repo)
+      const next = await load($, prev)
+      if (JSON.stringify(next) !== JSON.stringify(prev)) await update($, repo, () => next)
       lastEnd = await $.clock.now()
       cost = lastEnd - t0
     } while (again)
@@ -115,30 +118,30 @@ async function showDetail($: EngineInterface, h: string) {
 
 async function loadDetail($: EngineInterface, h: string) {
   if ((await read($, view)).cur !== `c:${h}`) return
-  const out = await $.process.run([
-    'git', 'show', '--no-show-signature', '--diff-merges=first-parent', '--shortstat',
-    '--format=%an%x1f%ct%x1f%s', h,
-  ])
+  const out = await $.process
+    .run(['git', 'show', '--no-show-signature', '--diff-merges=first-parent', '--shortstat', '--format=%an%x1f%ct%x1f%s', h])
+    .catch(() => undefined)
+  // 실패(그사이 사라진 커밋 등)는 표시만 하고 기억하지 않는다. 다음에 다시 가면 다시 읽는다.
+  if (!out || out.exitCode !== 0) return void (await update($, detail, () => ({ ...NO_DETAIL, h, error: true as const })))
   const [author = '', t = '0', s = ''] = (out.stdout.split('\n')[0] ?? '').split('\x1f')
   const num = (re: RegExp) => Number(re.exec(out.stdout)?.[1] ?? 0)
   const d: Detail = {
     h, author, t: Number(t), s,
     files: num(/(\d+) files? changed/), add: num(/(\d+) insertions?/), del: num(/(\d+) deletions?/),
   }
+  // ponytail: 1,000개를 넘으면 통째로 비운다. 커밋 하나당 100바이트 남짓이라 그 전까지는 그대로 둔다.
+  if (details.size >= 1000) details.clear()
   details.set(h, d)
   await update($, detail, () => d)
 }
 
-// 화면 줄은 이력, 펼친 구간, 고른 것, 시각(분 단위)이 바뀔 때만 다시 계산한다. 스크롤할 때마다 계산하지 않는다.
-// ponytail: repoRev는 이 모듈이 repo를 적을 때마다 오른다. 모듈을 다시 불러오면 0부터 시작해 한 번 다시 계산한다.
-let repoRev = 0
+// 화면 줄은 이력(rev), 펼친 구간, 고른 것, 시각(분 단위)이 바뀔 때만 다시 계산한다. 스크롤할 때마다 계산하지 않는다.
 let rowsMemo: { key: string; rows: Row[] } | undefined
 let relMemo: { rev: number; rel: ReturnType<typeof releases> } | undefined
 async function rowsOf($: EngineInterface, given?: { v?: View; r?: Repo; now?: number }): Promise<Row[]> {
-  const [v, t] = await Promise.all([given?.v ?? read($, view), given?.now ?? $.clock.now()])
-  const key = `${repoRev}|${v.open.join(',')}|${v.marks.join(',')}|${Math.floor(t / 60000)}`
+  const [v, r, t] = await Promise.all([given?.v ?? read($, view), given?.r ?? read($, repo), given?.now ?? $.clock.now()])
+  const key = `${r.rev}|${v.open.join(',')}|${v.marks.join(',')}|${Math.floor(t / 60000)}`
   if (rowsMemo?.key === key) return rowsMemo.rows
-  const r = given?.r ?? (await read($, repo))
   const rows = buildRows(r.commits, new Set(v.open), t, { track: r.track, marks: new Set(v.marks) })
   if (r.more) rows.push({ key: 'more', graph: [], label: [{ t: `최근 커밋 ${LIMIT}개까지만 보여 줍니다`, dim: true }], age: '' })
   rowsMemo = { key, rows }
@@ -179,7 +182,8 @@ export function promptList(marks: readonly string[], commits: Repo['commits']): 
 
 async function send($: EngineInterface, say?: Say) {
   const [r, v, rows] = await Promise.all([read($, repo), read($, view), rowsOf($)])
-  const marks = v.marks.length ? v.marks : [targetOf(rows.find(x => x.key === v.cur))].filter(Boolean)
+  const live = liveMarks(v.marks, r.commits)
+  const marks = live.length ? live : [targetOf(rows.find(x => x.key === v.cur))].filter(Boolean)
   if (!marks.length) return $.ui.toast('고른 것이 없습니다. x로 고르거나 커서를 커밋 줄에 두세요')
   const list = promptList(marks, r.commits)
   const filled = await $.prompt.fill({ text: `${say ? say(list, r.branch.split(' ')[0] || 'HEAD') : list} `, mode: 'insert' })
@@ -262,7 +266,8 @@ export const register: Register = on => {
       if ((await $.clock.now()) - lastEnd < Math.max(2000, cost * 30) - 100) return
       if (await isOpen($)) await refresh($)
     }
-    $.clock.every(2000, () => void tick().catch(() => {}))
+    ticker?.cancel()
+    ticker = $.clock.every(2000, () => void tick().catch(() => {}))
     return started
   })
 
@@ -277,7 +282,7 @@ export const register: Register = on => {
     const ran = await next(e)
     if (!ran.isReadOnly) {
       void isOpen($)
-        .then(open => (open ? refresh($) : undefined))
+        .then(shown => (shown ? refresh($) : undefined))
         .catch(() => {})
     }
     return ran
@@ -333,19 +338,19 @@ export const register: Register = on => {
     lastRows = Math.max(1, total - 4 - (hasActions ? 3 : 0) - (hasDetail ? 3 : 0))
     const focused = e.props.isFocused
 
-    // 색과 모양이 같은 이웃 글자는 Text 하나로 합쳐 터미널에 넘기는 요소 수를 절반 이하로 줄인다.
-    const segs = (list: Seg[]) => merge(list).map(s => seg(s))
     const seg = (s: Seg) => (
       <Text color={s.color} dimColor={s.dim} weight={s.bold && 'bold'} inverse={s.inverse} underline={s.underline}>
         {s.t}
       </Text>
     )
+    // 색과 모양이 같은 이웃 글자는 Text 하나로 합쳐 터미널에 넘기는 요소 수를 절반 이하로 줄인다.
+    const segs = (list: Seg[]) => merge(list).map(seg)
     const header = fit(
       [{ t: r.branch, bold: true }, ...(r.changes ? [{ t: `  변경 ${r.changes}개`, dim: true as const }] : [])],
       [{ t: r.name, dim: true }],
       cols,
     )
-    if (relMemo?.rev !== repoRev) relMemo = { rev: repoRev, rel: releases(r.commits) }
+    if (relMemo?.rev !== r.rev) relMemo = { rev: r.rev, rel: releases(r.commits) }
     const rel = relMemo.rel
     const header2 = fit(
       rel.flatMap((x, i): Seg[] => [...(i ? [{ t: '  ' }] : []), { t: `◇ ${x.tag}`, color: 'yellow' }, { t: ` +${x.ahead}`, dim: true }]),
@@ -377,11 +382,14 @@ export const register: Register = on => {
       if (row.hash) await showDetail($, row.hash)
     }
     const curRow = rows.find(r => r.key === v.cur)
+    const marked = liveMarks(v.marks, r.commits).length
 
     const foot: Seg[][] = []
     if (hasDetail) {
       const d = (curRow?.hash && details.get(curRow.hash)) || dState
-      if (curRow?.hash && d.h === curRow.hash) {
+      if (curRow?.hash && d.h === curRow.hash && d.error) {
+        foot.push([{ t: d.h.slice(0, 7), color: 'yellow' }], [{ t: '이 커밋의 상세를 읽지 못했습니다', dim: true }], [])
+      } else if (curRow?.hash && d.h === curRow.hash) {
         foot.push(
           fit([{ t: d.h.slice(0, 7), color: 'yellow' }, { t: `  ${d.author}  ${ageLong(d.t, now)}`, dim: true }], [], cols),
           fit([{ t: d.s, bold: true }], [], cols),
@@ -452,7 +460,7 @@ export const register: Register = on => {
           <Box flexDirection="row">
             {act('3', ACTIONS[2]!.label, () => send($, ACTIONS[2]!.say))}{gap}{act('4', ACTIONS[3]!.label, () => send($, ACTIONS[3]!.say))}{gap}
             {act('5', ACTIONS[4]!.label, () => send($, ACTIONS[4]!.say))}{gap}
-            <Text dimColor>{v.marks.length ? `고른 것 ${v.marks.length}개` : '고른 것 없음'}</Text>
+            <Text dimColor>{marked ? `고른 것 ${marked}개` : '고른 것 없음'}</Text>
           </Box>
         )}
         {hasActions && <Text>{segs(fit(hint, [], cols))}</Text>}

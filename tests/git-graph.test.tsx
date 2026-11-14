@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { buildRows, fit, parseLog, releases, trimGraphs } from '../hooks/graph'
+import { age, ageLong, buildRows, fit, liveMarks, parseLog, releases, statusBranch, trimGraphs, width } from '../hooks/graph'
 import { promptList, scrolled, stepped, windowStart } from '../hooks/register'
 
 // 시험 환경에는 있지만 타입 정의(lib)에는 없는 전역 함수
@@ -102,6 +102,33 @@ test('입력창에는 브랜치를 먼저, 커밋은 오래된 것부터 해시�
 test('한글은 2칸으로 세어 자르고 오른쪽 끝에 시각을 붙인다', () => {
   const line = fit([{ t: '가나다라마바' }], [{ t: '2d' }], 10)
   expect(line.map(s => s.t).join('')).toBe('가나다… 2d')
+})
+
+test('브랜치 이름에 점이 있어도 그대로 읽고 ahead/behind를 붙인다', () => {
+  expect(statusBranch('## release/1.2...origin/release/1.2 [ahead 1]')).toBe('release/1.2 ↑1')
+  expect(statusBranch('## v1.0')).toBe('v1.0')
+  expect(statusBranch('## main...origin/main [ahead 1, behind 2]')).toBe('main ↑1 ↓2')
+  expect(statusBranch('## main...origin/main [gone]')).toBe('main')
+  expect(statusBranch('## HEAD (no branch)')).toBe('HEAD (no branch)')
+  expect(statusBranch('## No commits yet on main')).toBe('main')
+})
+
+test('오른쪽 글자가 길거나 남은 칸이 없어도 줄이 폭을 넘지 않는다', () => {
+  const total = (segs: ReturnType<typeof fit>) => width(segs.map(s => s.t).join(''))
+  expect(total(fit([{ t: '왼쪽' }], [{ t: 'x'.repeat(30) }], 20))).toBe(20)
+  expect(total(fit([{ t: '왼쪽 글자' }], [{ t: 'x'.repeat(19) }], 20))).toBe(20)
+  // 결합 문자는 폭이 없다(e + 결합 악센트)
+  expect(width('e\u0301')).toBe(1)
+})
+
+test('고른 것 중 이력에서 사라진 커밋과 브랜치는 뺀다', () => {
+  expect(liveMarks(['c:top', 'c:gone', 'b:main', 'b:origin/feat/e2e', 'b:deleted'], parseLog(LOG))).toEqual(['c:top', 'b:main', 'b:origin/feat/e2e'])
+})
+
+test('지난 시간은 가장 큰 단위로 짧게, 상세에서는 한국어로 보여 준다', () => {
+  const now = 1700000000 * 1000
+  expect([age(1700000000 - 30, now), age(1700000000 - 7200, now), age(1700000000 - 86400 * 9, now)]).toEqual(['0m', '2h', '1w'])
+  expect([ageLong(1700000000 - 30, now), ageLong(1700000000 - 300, now), ageLong(1700000000 - 86400 * 400, now)]).toEqual(['방금', '5분 전', '1년 전'])
 })
 
 test('커서가 창 안에서 움직이면 창은 그대로고, 끝에서 더 나가면 한 줄씩 옮긴다', () => {
@@ -306,4 +333,38 @@ test('커서가 커밋 줄에 가면 아래에 그 커밋의 상세가 나오고
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /IRC 경로 수정/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('상세를 읽지 못하면 그렇게 알리고, 다시 가면 다시 읽는다', async ($, on) => {
+  let fail = true
+  on('command.register', () => ({ value: { command: 'git-graph' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.focus', () => ({}))
+  on('clock.every', () => ({ deny: '시험에서는 타이머를 쓰지 않는다' }))
+  on('clock.after', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: 1700003600 * 1000 }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_, e) => {
+    const show = e.argv.includes('show')
+    const stdout = show ? '나\x1f1700000000\x1fIRC 경로 수정\n\n 1 file changed, 2 insertions(+)\n' : e.argv.includes('log') ? LOG : '## main\n'
+    return { value: { exitCode: show && fail ? 128 : 0, stdout: show && fail ? '' : stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const move = (element: string) => $.ui.focus({ component: 'Pane', requestId: 'git-graph', element, origin: { kind: 'person' } })
+  const settle = () => new Promise(r => setTimeout(r, 20))
+  const footer = async (text: RegExp) => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const found = await ui.find({ type: 'Text', text })
+    await ui.unmount()
+    return !!found
+  }
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await move('c:top')
+  await settle()
+  expect(await footer(/상세를 읽지 못했습니다/)).toBe(true)
+  fail = false
+  await move('c:c')
+  await move('c:top')
+  await settle()
+  expect(await footer(/IRC 경로 수정/)).toBe(true)
 })

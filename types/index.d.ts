@@ -4,6 +4,8 @@ export type Commit = { h: string; p: string[]; refs: string[]; s: string; t: num
 export type Track = { up: string; ahead: number; behind: number; gone?: true }
 
 export type Repo = {
+  // 커밋 목록이나 동기화 상태를 다시 읽을 때마다 오르는 번호. 화면 줄 계산을 재사용할지 판단한다.
+  rev: number
   branch: string
   changes: number
   name: string
@@ -21,7 +23,8 @@ export type Repo = {
 // marks: x로 고른 것(c:<해시> 또는 b:<브랜치>)
 export type View = { open: string[]; cur: string; off: number; start: number; marks: string[] }
 
-export type Detail = { h: string; author: string; t: number; s: string; files: number; add: number; del: number }
+// error: git show가 실패한 커밋(기억하지 않고, 다시 가면 다시 읽는다)
+export type Detail = { h: string; author: string; t: number; s: string; files: number; add: number; del: number; error?: true }
 
 declare module 'claude-code' {
   interface PluginState {
