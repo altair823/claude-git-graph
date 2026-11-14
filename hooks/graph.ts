@@ -1,6 +1,6 @@
 // 커밋 목록을 레인 그래프로 배치하고, 접기와 펼치기를 반영한 화면 줄로 만든다.
 // $를 쓰지 않는 순수 함수만 둔다.
-import type { Commit } from '../types'
+import type { Commit, Track } from '../types'
 
 export type Seg = {
   t: string
@@ -18,7 +18,14 @@ export type Row = {
   age: string
   hash?: string
   fold?: string
+  // 브랜치 끝을 접은 줄이면 그 브랜치 이름(x로 브랜치를 고를 때 쓴다)
+  branch?: string
 }
+
+// 화면에 보일 이름표. 원격 이름은 로컬 브랜치와 합치거나 숨긴 뒤 남은 것만 있다.
+type Ref = { kind: 'local' | 'remote' | 'tag'; name: string; ahead?: number; behind?: number; gone?: true }
+
+export type Ctx = { track: Record<string, Track>; marks: ReadonlySet<string> }
 
 // 터미널 테마를 따라가도록 ANSI 색 이름을 쓴다.
 export const PALETTE = ['blue', 'magenta', 'green', 'cyan', 'yellow', 'red']
@@ -34,8 +41,74 @@ export function parseLog(out: string): Commit[] {
     })
 }
 
+const isHeadRef = (r: string) => r === 'HEAD' || r.startsWith('HEAD -> ')
+const tagName = (r: string) => r.replace(/^tag: (refs\/tags\/)?/, '')
+
+function ancestors(byHash: Map<string, Commit>, from: string): Set<string> {
+  const seen = new Set<string>()
+  const stack = [from]
+  while (stack.length) {
+    const h = stack.pop()!
+    const c = byHash.get(h)
+    if (!c || seen.has(h)) continue
+    seen.add(h)
+    stack.push(...c.p)
+  }
+  return seen
+}
+
+// git log --decorate=full의 %D를 화면용 이름표로 바꾼다.
+// 원격 브랜치는 추적하는 로컬 브랜치와 같은 커밋이면 로컬 칩에 합치고, 추적하는 로컬이 없으면서 HEAD에 이미 병합됐으면 숨긴다.
+function visibleRefs(commits: Commit[], track: Record<string, Track>): Map<string, Ref[]> {
+  const byHash = new Map(commits.map(c => [c.h, c]))
+  const head = commits.find(c => c.refs.some(isHeadRef))
+  const merged = head ? ancestors(byHash, head.h) : new Set<string>()
+  const localAt = new Map<string, string>()
+  for (const c of commits) {
+    for (const raw of c.refs) {
+      const r = raw.replace(/^HEAD -> /, '')
+      if (r.startsWith('refs/heads/')) localAt.set(r.slice(11), c.h)
+    }
+  }
+  // 원격 하나를 여러 로컬 브랜치가 추적할 수 있다.
+  const trackers = new Map<string, string[]>()
+  for (const [local, t] of Object.entries(track)) trackers.set(t.up, [...(trackers.get(t.up) ?? []), local])
+  const out = new Map<string, Ref[]>()
+  for (const c of commits) {
+    const refs: Ref[] = []
+    for (const raw of c.refs) {
+      const r = raw.replace(/^HEAD -> /, '')
+      if (r === 'HEAD' || r.endsWith('/HEAD')) continue
+      if (r.startsWith('tag: ')) refs.push({ kind: 'tag', name: tagName(r) })
+      else if (r.startsWith('refs/heads/')) {
+        const name = r.slice(11)
+        const t = track[name]
+        refs.push({ kind: 'local', name, ...(t?.ahead ? { ahead: t.ahead } : {}), ...(t?.behind ? { behind: t.behind } : {}), ...(t?.gone ? { gone: true as const } : {}) })
+      } else if (r.startsWith('refs/remotes/')) {
+        const name = r.slice(13)
+        const locals = trackers.get(name)
+        if (locals ? locals.some(l => localAt.get(l) === c.h) : merged.has(c.h)) continue
+        refs.push({ kind: 'remote', name })
+      }
+    }
+    out.set(c.h, refs)
+  }
+  return out
+}
+
+function chips(refs: Ref[], color: string | undefined): Seg[] {
+  return refs.flatMap((r): Seg[] => {
+    if (r.kind === 'tag') return [{ t: `◇ ${r.name}`, color: 'yellow', bold: true }, { t: ' ' }]
+    if (r.kind === 'remote') return [{ t: r.name, color, dim: true }, { t: ' ' }]
+    const sync = `${r.ahead ? `↑${r.ahead}` : ''}${r.behind ? `↓${r.behind}` : ''}${r.gone ? '원격 없음' : ''}`
+    return [{ t: ` ${r.name} `, color, inverse: true, bold: true }, ...(sync ? [{ t: sync, color }] : []), { t: ' ' }]
+  })
+}
+
 type Laid = {
   c: Commit
+  refs: Ref[]
+  isHead: boolean
   col: number
   before: boolean[]
   after: boolean[]
@@ -44,7 +117,8 @@ type Laid = {
   colors: number[]
 }
 
-export function layout(commits: Commit[]): Laid[] {
+export function layout(commits: Commit[], track: Record<string, Track> = {}): Laid[] {
+  const shown = visibleRefs(commits, track)
   const lanes: (string | null)[] = []
   const colorOf: number[] = []
   let nextColor = 0
@@ -80,7 +154,7 @@ export function layout(commits: Commit[]): Laid[] {
     })
     const after = lanes.map(x => x !== null)
     while (lanes.length && lanes[lanes.length - 1] === null) lanes.pop()
-    return { c, col, before, after, joins, outs, colors: [...colorOf] }
+    return { c, refs: shown.get(c.h) ?? [], isHead: c.refs.some(isHeadRef), col, before, after, joins, outs, colors: [...colorOf] }
   })
 }
 
@@ -112,23 +186,6 @@ function passing(r: Laid, width: number, ch: string): Seg[] {
   return out
 }
 
-// git log --decorate=full의 %D를 읽는다: 로컬 브랜치, 원격 브랜치, 태그를 구분한다.
-function cleanRefs(refs: string[]) {
-  const isHead = refs.some(r => r === 'HEAD' || r.startsWith('HEAD -> '))
-  const names = refs
-    .map(r => r.replace(/^HEAD -> /, ''))
-    .filter(r => r !== 'HEAD' && !r.endsWith('/HEAD'))
-  return { isHead, names }
-}
-
-function chips(names: string[], color: string | undefined): Seg[] {
-  return names.flatMap((n): Seg[] => {
-    if (n.startsWith('tag: ')) return [{ t: n.replace(/^tag: (refs\/tags\/)?/, ''), color: 'yellow', bold: true }, { t: ' ' }]
-    if (n.startsWith('refs/remotes/')) return [{ t: n.slice(13), color }, { t: ' ' }]
-    return [{ t: ` ${n.replace(/^refs\/heads\//, '')} `, color, inverse: true, bold: true }, { t: ' ' }]
-  })
-}
-
 export function age(t: number, now: number): string {
   const s = Math.max(0, now / 1000 - t)
   if (s < 3600) return `${Math.floor(s / 60)}m`
@@ -150,34 +207,33 @@ export function ageLong(t: number, now: number): string {
   return `${Math.floor(s / 31557600)}년 전`
 }
 
-// 기본 화면(B)에 남는 커밋: HEAD, 이름이 붙은 커밋, 병합, 분기점, 첫 커밋.
-const isKey = (r: Laid) => r.c.refs.length > 0 || r.c.p.length !== 1 || r.joins.length > 0
+const MARK: Seg = { t: '✓ ', color: 'green', bold: true }
 
-export function buildRows(commits: Commit[], open: ReadonlySet<string>, now: number): Row[] {
-  const laid = layout(commits)
+// 기본 화면(B)에 남는 커밋: HEAD, 이름표가 남은 커밋, 병합, 분기점, 첫 커밋.
+const isKey = (r: Laid) => r.isHead || r.refs.length > 0 || r.c.p.length !== 1 || r.joins.length > 0
+
+export function buildRows(commits: Commit[], open: ReadonlySet<string>, now: number, ctx: Ctx = { track: {}, marks: new Set() }): Row[] {
+  const laid = layout(commits, ctx.track)
   const width = Math.max(1, ...laid.map(r => Math.max(r.before.length, r.after.length, r.col + 1)))
   const rows: Row[] = []
   const color = (r: Laid) => PALETTE[r.colors[r.col]!]
+  const mark = (on: boolean): Seg[] => (on ? [MARK] : [])
   // 펼친 구간과 그 안의 커밋(A 화면): 그래프와 제목을 모두 보여 준다.
-  const full = (r: Laid): Row => {
-    const { isHead, names } = cleanRefs(r.c.refs)
-    return {
-      key: `c:${r.c.h}`,
-      hash: r.c.h,
-      graph: cells(r, width, isHead ? '◉' : '●'),
-      label: [...chips(names, color(r)), { t: r.c.s }],
-      age: age(r.c.t, now),
-    }
-  }
+  const full = (r: Laid): Row => ({
+    key: `c:${r.c.h}`,
+    hash: r.c.h,
+    graph: cells(r, width, r.isHead ? '◉' : '●'),
+    label: [...mark(ctx.marks.has(`c:${r.c.h}`)), ...chips(r.refs, color(r)), { t: r.c.s }],
+    age: age(r.c.t, now),
+  })
   // 접힌 화면의 주요 커밋(B 화면): 이름표만, 없으면 병합 대상이나 짧은 해시.
   const brief = (r: Laid): Row => {
-    const { isHead, names } = cleanRefs(r.c.refs)
     // git 기본 병합 제목과 Gitea, GitHub PR 병합 제목에서 들어온 브랜치 이름을 꺼낸다.
     const merged = /^Merge branch '([^']+)'/.exec(r.c.s)?.[1] ?? /^Merge pull request .* from (\S+)/.exec(r.c.s)?.[1]
-    const label: Seg[] = chips(names, color(r))
+    const label: Seg[] = [...mark(ctx.marks.has(`c:${r.c.h}`)), ...chips(r.refs, color(r))]
     if (r.c.p.length > 1) label.push({ t: 'merge ', dim: true }, merged ? { t: merged, color: PALETTE[r.colors[r.outs[0]?.lane ?? r.col]!] } : { t: r.c.s, dim: true })
-    else if (!names.length) label.push({ t: r.c.h.slice(0, 7), dim: true })
-    return { key: `c:${r.c.h}`, hash: r.c.h, graph: cells(r, width, isHead ? '◉' : r.c.p.length === 0 ? '○' : '●'), label, age: age(r.c.t, now) }
+    else if (!r.refs.length) label.push({ t: r.c.h.slice(0, 7), dim: true })
+    return { key: `c:${r.c.h}`, hash: r.c.h, graph: cells(r, width, r.isHead ? '◉' : r.c.p.length === 0 ? '○' : '●'), label, age: age(r.c.t, now) }
   }
   for (let i = 0; i < laid.length; ) {
     const r = laid[i]!
@@ -185,21 +241,22 @@ export function buildRows(commits: Commit[], open: ReadonlySet<string>, now: num
     while (j < laid.length && !isKey(laid[j]!)) j++
     const run = laid.slice(i + 1, j)
     // 브랜치 끝 뒤의 커밋이 모두 같은 레인에 있을 때만 그 브랜치의 개수로 묶는다.
-    const tipOnly = r.c.refs.length > 0 && r.c.p.length === 1 && r.joins.length === 0 && run.every(x => x.col === r.col)
+    const tipOnly = r.refs.some(x => x.kind !== 'tag') && r.c.p.length === 1 && r.joins.length === 0 && run.every(x => x.col === r.col)
     if (!isKey(r)) {
-      // 맨 위 커밋에 이름이 없는 경우(분리된 HEAD가 아닌데 목록이 잘린 경우 등)는 구간으로 다룬다.
+      // 맨 위 커밋에 이름이 없으면(목록이 잘린 경우 등) 구간으로 다룬다.
       j = i
       while (j < laid.length && !isKey(laid[j]!)) j++
       pushRun(laid.slice(i, j), `r:${r.c.h}`)
     } else if (tipOnly && run.length) {
       const id = `t:${r.c.h}`
       const isOpen = open.has(id)
-      const { isHead, names } = cleanRefs(r.c.refs)
+      const branch = (r.refs.find(x => x.kind === 'local') ?? r.refs.find(x => x.kind === 'remote'))!.name
       rows.push({
         key: `f:${id}`,
         fold: id,
-        graph: cells(r, width, isHead ? '◉' : '◆'),
-        label: [...chips(names, color(r)), { t: `${isOpen ? '▾' : '▸'} ${run.length + 1}`, underline: true }],
+        branch,
+        graph: cells(r, width, r.isHead ? '◉' : '◆'),
+        label: [...mark(ctx.marks.has(`b:${branch}`)), ...chips(r.refs, color(r)), { t: `${isOpen ? '▾' : '▸'} ${run.length + 1}`, underline: true }],
         age: age(r.c.t, now),
       })
       if (isOpen) for (const x of [r, ...run]) rows.push(full(x))
@@ -222,6 +279,35 @@ export function buildRows(commits: Commit[], open: ReadonlySet<string>, now: num
     })
     if (isOpen) for (const x of run) rows.push(full(x))
   }
+}
+
+// 태그 계열(v*, app-v* 등)마다 HEAD에서 가장 가까운 태그와, 그 뒤로 쌓인 커밋 수. 가까운 계열부터 둘까지.
+export function releases(commits: Commit[]): { tag: string; ahead: number }[] {
+  const byHash = new Map(commits.map(c => [c.h, c]))
+  const head = commits.find(c => c.refs.some(isHeadRef))
+  if (!head) return []
+  const all = ancestors(byHash, head.h)
+  const found = new Map<string, { tag: string; h: string }>()
+  const seen = new Set<string>()
+  const queue = [head.h]
+  while (queue.length && found.size < 2) {
+    const h = queue.shift()!
+    const c = byHash.get(h)
+    if (!c || seen.has(h)) continue
+    seen.add(h)
+    for (const r of c.refs.filter(x => x.startsWith('tag: '))) {
+      const tag = tagName(r)
+      const family = tag.replace(/\d.*$/, '')
+      if (!found.has(family)) found.set(family, { tag, h })
+    }
+    queue.push(...c.p)
+  }
+  return [...found.values()].map(({ tag, h }) => {
+    const base = ancestors(byHash, h)
+    let ahead = 0
+    for (const x of all) if (!base.has(x)) ahead++
+    return { tag, ahead }
+  })
 }
 
 // 화면에 보이는 줄들의 그래프 폭을 그 줄들에서 가장 오른쪽 선까지로 줄인다.

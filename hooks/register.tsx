@@ -1,16 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Detail, Repo, View } from '../types'
-import { ageLong, buildRows, fit, parseLog, trimGraphs } from './graph'
+import type { Detail, Repo, Track, View } from '../types'
+import { ageLong, buildRows, fit, parseLog, releases, trimGraphs } from './graph'
 import type { Row, Seg } from './graph'
 
 const PANE = 'git-graph'
 const LIMIT = 500
-const FOOT = 5
 // 저장 형태가 바뀌면 shape 값을 올린다. 이전 버전이 저장한 값은 버려진다.
-const repo = atom({ plugin: 'git-graph', key: 'repo' } as const, { branch: '', changes: 0, name: '', commits: [], more: false } as Repo, { shape: 'repo-1' })
-const view = atom({ plugin: 'git-graph', key: 'view' } as const, { open: [], sel: '', cur: '', start: 0 } as View, { shape: 'view-1' })
+const EMPTY: Repo = { branch: '', changes: 0, name: '', commits: [], more: false, track: {}, fetched: 0 }
+const repo = atom({ plugin: 'git-graph', key: 'repo' } as const, EMPTY, { shape: 'repo-2' })
+const view = atom({ plugin: 'git-graph', key: 'view' } as const, { open: [], sel: '', cur: '', start: 0, marks: [] } as View, { shape: 'view-2' })
 const detail = atom({ plugin: 'git-graph', key: 'detail' } as const, { h: '', author: '', t: 0, s: '', files: 0, add: 0, del: 0 } as Detail, { shape: 'detail-1' })
 
 const LOG = [
@@ -21,8 +21,22 @@ const LOG = [
 // --no-optional-locks: 주기적으로 돌아도 index.lock을 잡지 않아 다른 git 작업과 충돌하지 않는다.
 const STATUS = ['git', '--no-optional-locks', 'status', '--porcelain=v1', '--branch']
 // 저장소 위치와 HEAD, 모든 브랜치와 태그가 가리키는 커밋. 둘 다 그대로면 이력도 그대로라 git log를 건너뛴다.
-const TOP = ['git', 'rev-parse', '--show-toplevel', 'HEAD']
+// 저장소 위치, FETCH_HEAD 파일 위치(마지막 fetch 시각을 읽는다), HEAD 순서로 한 줄씩 나온다.
+const TOP = ['git', 'rev-parse', '--show-toplevel', '--path-format=absolute', '--git-path', 'FETCH_HEAD', 'HEAD']
 const REFS = ['git', 'for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/remotes', 'refs/tags']
+// 로컬 브랜치마다 upstream과 앞선 수, 뒤처진 수. ref가 바뀔 때만 읽는다.
+const TRACK = ['git', 'for-each-ref', '--format=%(refname:short)%09%(upstream:short)%09%(upstream:track,nobracket)', 'refs/heads']
+
+function parseTrack(out: string): Record<string, Track> {
+  const track: Record<string, Track> = {}
+  for (const line of out.split('\n').filter(Boolean)) {
+    const [name = '', up = '', state = ''] = line.split('\t')
+    if (!up) continue
+    const num = (re: RegExp) => Number(re.exec(state)?.[1] ?? 0)
+    track[name] = { up, ahead: num(/ahead (\d+)/), behind: num(/behind (\d+)/), ...(state === 'gone' ? { gone: true as const } : {}) }
+  }
+  return track
+}
 
 // ponytail: 마지막으로 그린 그래프 영역의 높이. 모듈을 다시 불러오면 다음 그리기에서 다시 맞춰진다.
 let lastRows = 20
@@ -31,23 +45,25 @@ let lastRows = 20
 let lastRefs = ''
 
 async function load($: EngineInterface): Promise<Repo> {
-  const empty: Repo = { branch: '', changes: 0, name: '', commits: [], more: false }
+  const empty = EMPTY
   try {
     const [status, top, refs] = await Promise.all([$.process.run(STATUS), $.process.run(TOP), $.process.run(REFS)])
     if (status.exitCode !== 0) return { ...empty, error: 'git 저장소가 아닙니다' }
     const [head = '', ...changes] = status.stdout.split('\n').filter(Boolean)
     const m = /^## (?:No commits yet on )?([^.\s]+)(?:\.\.\.\S+)?(?: \[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\])?/.exec(head)
     const branch = [m?.[1] ?? head.slice(3), m?.[2] && `↑${m[2]}`, m?.[3] && `↓${m[3]}`].filter(Boolean).join(' ')
-    const name = top.stdout.split('\n')[0]?.trim().split('/').pop() ?? ''
-    const base = { branch, name, changes: changes.length }
+    const [toplevel = '', fetchHead = ''] = top.stdout.split('\n')
+    const name = toplevel.trim().split('/').pop() ?? ''
+    const fetched = await $.fs.stat(fetchHead.trim()).then(st => st.mtimeMs, () => 0)
+    const base = { branch, name, changes: changes.length, fetched }
     const key = top.stdout + refs.stdout
     const prev = await read($, repo)
     if (key === lastRefs && !prev.error) return { ...prev, ...base }
-    const log = await $.process.run(LOG)
+    const [log, track] = await Promise.all([$.process.run(LOG), $.process.run(TRACK)])
     if (log.exitCode !== 0) return { ...empty, ...base, error: log.stderr.split('\n')[0] }
     lastRefs = key
     const commits = parseLog(log.stdout)
-    return { ...base, commits, more: commits.length >= LIMIT }
+    return { ...base, commits, more: commits.length >= LIMIT, track: parseTrack(track.stdout) }
   } catch (err) {
     return { ...empty, error: `git 실행 실패: ${String(err)}` }
   }
@@ -98,9 +114,52 @@ async function select($: EngineInterface, h: string) {
 
 async function rowsOf($: EngineInterface, now?: number): Promise<Row[]> {
   const [r, v, t] = await Promise.all([read($, repo), read($, view), now ?? $.clock.now()])
-  const rows = buildRows(r.commits, new Set(v.open), t)
+  const rows = buildRows(r.commits, new Set(v.open), t, { track: r.track, marks: new Set(v.marks) })
   if (r.more) rows.push({ key: 'more', graph: [], label: [{ t: `최근 커밋 ${LIMIT}개까지만 보여 줍니다`, dim: true }], age: '' })
   return rows
+}
+
+// 커서가 있는 줄을 고를 대상으로 바꾼다: 커밋 줄은 커밋, 브랜치 끝을 접은 줄은 브랜치.
+const targetOf = (row?: Row) => (row?.hash ? `c:${row.hash}` : row?.branch ? `b:${row.branch}` : '')
+
+async function toggleMark($: EngineInterface) {
+  const [v, rows] = await Promise.all([read($, view), rowsOf($)])
+  const id = targetOf(rows.find(r => r.key === v.cur))
+  if (!id) return
+  await update($, view, x => ({ ...x, marks: x.marks.includes(id) ? x.marks.filter(m => m !== id) : [...x.marks, id] }))
+}
+
+type Say = (list: string, branch: string) => string
+const ACTIONS: { hotkey: string; label: string; say: Say }[] = [
+  { hotkey: '1', label: '체리픽', say: (list, b) => `다음을 ${b} 브랜치에 체리픽해 줘: ${list}` },
+  { hotkey: '2', label: '리베이스', say: (list, b) => `${b} 브랜치를 다음 위로 리베이스해 줘: ${list}` },
+  { hotkey: '3', label: '병합', say: (list, b) => `다음을 ${b} 브랜치에 병합해 줘: ${list}` },
+  { hotkey: '4', label: '되돌리기', say: list => `다음 커밋을 revert해 줘: ${list}` },
+  { hotkey: '5', label: '리뷰', say: list => `다음 변경을 리뷰해 줘: ${list}` },
+]
+
+// 고른 것(없으면 커서가 있는 줄)을 입력창에 넣는다. 보내기는 사람이 한다.
+export function promptList(marks: readonly string[], commits: Repo['commits']): string {
+  const order = new Map(commits.map((c, i) => [c.h, i]))
+  const branches = marks.filter(m => m.startsWith('b:')).map(m => `\`${m.slice(2)}\` 브랜치`)
+  // 체리픽 순서가 맞도록 오래된 커밋부터 적는다.
+  const picked = marks
+    .filter(m => m.startsWith('c:'))
+    .map(m => m.slice(2))
+    .sort((a, b) => (order.get(b) ?? 0) - (order.get(a) ?? 0))
+    .map(h => `\`${h.slice(0, 7)}\` ${commits[order.get(h) ?? -1]?.s ?? ''}`.trim())
+  return [...branches, ...picked].join(', ')
+}
+
+async function send($: EngineInterface, say?: Say) {
+  const [r, v, rows] = await Promise.all([read($, repo), read($, view), rowsOf($)])
+  const marks = v.marks.length ? v.marks : [targetOf(rows.find(x => x.key === v.cur))].filter(Boolean)
+  if (!marks.length) return $.ui.toast('고른 것이 없습니다. x로 고르거나 커서를 커밋 줄에 두세요')
+  const list = promptList(marks, r.commits)
+  const filled = await $.prompt.fill({ text: `${say ? say(list, r.branch.split(' ')[0] || 'HEAD') : list} `, mode: 'insert' })
+  if (!filled.isFilled) return $.ui.toast('입력창에 넣지 못했습니다')
+  await update($, view, x => ({ ...x, marks: [] }))
+  $.ui.toast('입력창에 넣었습니다. Esc로 입력창에 돌아가 보내세요')
 }
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
@@ -178,8 +237,10 @@ export const register: Register = on => {
     // 마지막 칸에 글자를 쓰면 줄이 넘어갈 수 있어 한 칸 남긴다.
     const cols = Math.max(20, e.props.bodyColumns - 1)
     const total = Math.max(4, e.props.scroll.bodyRows)
-    const hasFoot = total >= 14
-    lastRows = total - 1 - (hasFoot ? FOOT : 0)
+    // 위 2줄(브랜치, 릴리스), 아래 단축키 2줄, 그 위 상세 4줄. 패널이 낮으면 상세부터 뺀다.
+    const hasActions = total >= 10
+    const hasDetail = total >= 20
+    lastRows = total - 2 - (hasActions ? 2 : 0) - (hasDetail ? 4 : 0)
 
     const seg = (s: Seg, bg?: string) => (
       <Text color={s.color} dimColor={s.dim} weight={s.bold && 'bold'} inverse={s.inverse} underline={s.underline} backgroundColor={bg}>
@@ -189,6 +250,12 @@ export const register: Register = on => {
     const header = fit(
       [{ t: r.branch, bold: true }, ...(r.changes ? [{ t: `  변경 ${r.changes}개`, dim: true as const }] : [])],
       [{ t: r.name, dim: true }],
+      cols,
+    )
+    const rel = releases(r.commits)
+    const header2 = fit(
+      rel.flatMap((x, i): Seg[] => [...(i ? [{ t: '  ' }] : []), { t: `◇ ${x.tag}`, color: 'yellow' }, { t: ` +${x.ahead}`, dim: true }]),
+      [{ t: r.fetched ? `fetch ${ageLong(r.fetched / 1000, now)}` : 'fetch 기록 없음', dim: true }],
       cols,
     )
     if (r.error) {
@@ -213,7 +280,7 @@ export const register: Register = on => {
         : select($, row.hash!)
 
     const foot: Seg[][] = []
-    if (hasFoot) {
+    if (hasDetail) {
       foot.push([{ t: '─'.repeat(cols), dim: true }])
       if (v.sel && d.h === v.sel) {
         foot.push(
@@ -226,14 +293,19 @@ export const register: Register = on => {
       } else if (v.sel) {
         foot.push([{ t: '불러오는 중', dim: true }], [], [])
       } else {
-        foot.push([{ t: '↑↓로 옮기고 Enter로 펼치거나 고릅니다', dim: true }], [{ t: '마우스로 누르면 바로 고릅니다', dim: true }], [])
+        foot.push([{ t: '↑↓ 이동  Enter 펼치기, 상세  Esc 입력창으로', dim: true }], [{ t: 'x로 여러 개 고른 뒤 p나 숫자로 입력창에 넣기', dim: true }], [])
       }
-      foot.push([{ t: '↑↓ 이동  Enter 고르기  Esc 프롬프트로', dim: true }])
     }
+    // 단축키는 패널이 키보드를 가지고 있을 때 동작한다. 고른 것이 없으면 커서가 있는 줄을 쓴다.
+    const act = (hotkey: string, label: string, onPress: () => unknown) => (
+      <Button key={`act:${hotkey}`} plain hotkey={hotkey} onPress={() => void onPress()}>{label}</Button>
+    )
+    const gap = <Text>  </Text>
 
     return (
       <Box flexDirection="column">
         <Text>{header.map(s => seg(s))}</Text>
+        <Text>{header2.map(s => seg(s))}</Text>
         {shown.map(row => {
           const bg = row.hash && row.hash === v.sel ? 'subtle' : undefined
           const kids = fit([...row.graph, { t: '  ' }, ...row.label], row.age ? [{ t: row.age, dim: true }] : [], cols).map(s => seg(s, bg))
@@ -245,6 +317,19 @@ export const register: Register = on => {
         })}
         {Array.from({ length: Math.max(0, lastRows - shown.length) }, () => <Text> </Text>)}
         {foot.map(line => <Text>{line.length ? line.map(s => seg(s)) : ' '}</Text>)}
+        {hasActions && (
+          <Box flexDirection="row">
+            {act('x', '고르기', () => toggleMark($))}{gap}{act('p', '넣기', () => send($))}{gap}
+            {act('1', ACTIONS[0]!.label, () => send($, ACTIONS[0]!.say))}{gap}{act('2', ACTIONS[1]!.label, () => send($, ACTIONS[1]!.say))}
+          </Box>
+        )}
+        {hasActions && (
+          <Box flexDirection="row">
+            {act('3', ACTIONS[2]!.label, () => send($, ACTIONS[2]!.say))}{gap}{act('4', ACTIONS[3]!.label, () => send($, ACTIONS[3]!.say))}{gap}
+            {act('5', ACTIONS[4]!.label, () => send($, ACTIONS[4]!.say))}{gap}
+            <Text dimColor>{v.marks.length ? `고른 것 ${v.marks.length}개` : '고른 것 없음'}</Text>
+          </Box>
+        )}
       </Box>
     )
   })

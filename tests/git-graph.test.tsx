@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
-import { buildRows, fit, parseLog, trimGraphs } from '../hooks/graph'
-import { keepInView } from '../hooks/register'
+import { buildRows, fit, parseLog, releases, trimGraphs } from '../hooks/graph'
+import { keepInView, promptList } from '../hooks/register'
 
 // 시험 환경에는 있지만 타입 정의(lib)에는 없는 전역 함수
 declare const setTimeout: (fn: (value?: unknown) => void, ms: number) => unknown
@@ -37,20 +37,49 @@ const text = (rows: ReturnType<typeof buildRows>) =>
   trimGraphs(rows).map(r => [...r.graph, { t: '  ' }, ...r.label].map(s => s.t).join('').trimEnd())
 
 test('기본 화면은 이름이 붙은 커밋, 병합, 분기점만 남기고 나머지를 접는다', () => {
+  // origin/feat/e2e는 추적하는 로컬 브랜치가 없고 이미 병합됐으므로 숨겨져 접힌 구간에 들어간다.
   const rows = buildRows(parseLog(LOG), new Set(), 1700000000 * 1000)
   expect(text(rows)).toEqual([
     '◉     main',
     '●─╮  merge feat/e2e',
-    '│ ●  origin/feat/e2e',
-    '┊ ┊  ▸ 커밋 2개',
-    '●─╯  v1',
+    '┊ ┊  ▸ 커밋 3개',
+    '●─╯  ◇ v1',
     '○    c',
   ])
 })
 
 test('구간을 펼치면 그 안의 커밋을 레인 그래프와 제목으로 보여 준다', () => {
-  const rows = buildRows(parseLog(LOG), new Set(['r:a']), 1700000000 * 1000)
-  expect(text(rows).slice(3, 6)).toEqual(['│ │  ▾ 커밋 2개', '● │  문서 정리', '│ ●  e2e 러너'])
+  const rows = buildRows(parseLog(LOG), new Set(['r:f2']), 1700000000 * 1000)
+  expect(text(rows).slice(2, 6)).toEqual(['│ │  ▾ 커밋 3개', '│ ●  e2e 재시도', '● │  문서 정리', '│ ●  e2e 러너'])
+})
+
+test('원격은 로컬 칩에 앞선 수로 합치고, 병합 안 된 원격 브랜치만 흐리게 남긴다', () => {
+  const log =
+    rec('top', 'm', 'HEAD -> refs/heads/main', 'IRC 경로 수정') +
+    rec('s1', 'm', 'refs/remotes/origin/spike', '실험') +
+    rec('m', 'c', 'refs/remotes/origin/main, refs/remotes/origin/HEAD', '문서 정리') +
+    rec('c', '', '', '첫 커밋')
+  // 같은 원격을 추적하는 다른 로컬 브랜치(old)가 있어도 main 기준으로 판단해야 한다.
+  const track = { main: { up: 'origin/main', ahead: 1, behind: 0 }, old: { up: 'origin/main', ahead: 0, behind: 3 } }
+  const rows = buildRows(parseLog(log), new Set(), 1700000000 * 1000, { track, marks: new Set(['c:s1']) })
+  expect(text(rows)).toEqual(['◉     main ↑1', '│ ●  ✓ origin/spike', '●─╯  origin/main', '○    c'])
+})
+
+test('같은 원격을 여러 로컬 브랜치가 추적해도, 같은 커밋을 가리키는 로컬이 있으면 원격 이름을 합친다', () => {
+  const log =
+    rec('top', 'c', 'HEAD -> refs/heads/main, refs/remotes/origin/main', 'IRC 경로 수정') +
+    rec('c', '', 'refs/heads/old', '첫 커밋')
+  const track = { main: { up: 'origin/main', ahead: 0, behind: 0 }, old: { up: 'origin/main', ahead: 0, behind: 1 } }
+  const rows = buildRows(parseLog(log), new Set(), 1700000000 * 1000, { track, marks: new Set() })
+  expect(text(rows)).toEqual(['◉   main', '○   old ↓1'])
+})
+
+test('태그 계열마다 마지막 릴리스 뒤로 쌓인 커밋 수를 센다', () => {
+  expect(releases(parseLog(LOG))).toEqual([{ tag: 'v1', ahead: 5 }])
+})
+
+test('입력창에는 브랜치를 먼저, 커밋은 오래된 것부터 해시와 제목으로 넣는다', () => {
+  expect(promptList(['c:top', 'b:feat/x', 'c:a'], parseLog(LOG))).toBe('`feat/x` 브랜치, `a` 문서 정리, `top` IRC 경로 수정')
 })
 
 test('한글은 2칸으로 세어 자르고 오른쪽 끝에 시각을 붙인다', () => {
@@ -92,9 +121,9 @@ test('패널에 브랜치와 그래프를 그리고, 접힌 구간을 누르면 
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /변경/ }))?.text).toMatch(/^main ↑1  변경 2개 +kkachi$/)
     expect(await ui.find({ type: 'Text', text: /문서 정리/ })).toBeUndefined()
-    await ui.press({ key: 'f:r:a' })
+    await ui.press({ key: 'f:r:f2' })
     expect((await ui.find({ key: 'c:a' }))?.text).toContain('● │  문서 정리')
-    await ui.press({ key: 'f:r:a' })
+    await ui.press({ key: 'f:r:f2' })
     await ui.unmount()
   }
 })
