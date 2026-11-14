@@ -211,9 +211,10 @@ function cells(r: Laid, width: number, node: string): Seg[] {
 }
 
 // 커밋 기호. 레인 선과 이어지도록 선 문자로 그리고, 위(자식)와 아래(부모)로 선이 이어진 쪽만 그린다.
-// HEAD는 지금 위치가 바로 보이도록 ◉로 둔다.
+// 차례는 [없음, 아래, 위, 위아래]다. HEAD는 이중 막대로 구분한다.
 const NODE = ['━', '┯', '┷', '┿']
-const node = (r: Laid) => (r.isHead ? '◉' : NODE[(r.before[r.col] ? 2 : 0) + (r.after[r.col] ? 1 : 0)]!)
+const HEAD_NODE = ['═', '╤', '╧', '╪']
+const node = (r: Laid, up: boolean) => (r.isHead ? HEAD_NODE : NODE)[(up ? 2 : 0) + (r.after[r.col] ? 1 : 0)]!
 
 function passing(r: Laid, width: number, ch: string): Seg[] {
   const out: Seg[] = []
@@ -271,20 +272,22 @@ export function buildRows(commits: Commit[], open: ReadonlySet<string>, now: num
       key: `c:${r.c.h}`,
       hash: r.c.h,
       ...(branch ? { branch } : {}),
-      graph: cells(r, width, node(r)),
+      // 작업 중 변경 줄이 HEAD 위에 있으면 그 줄과 잇는다.
+      graph: cells(r, width, node(r, !!r.before[r.col] || (r.isHead && !!ctx.wip))),
       label: [
         ...(ctx.marks.has(`c:${r.c.h}`) ? [MARK] : []),
+        ...(r.isHead ? [{ t: 'HEAD ', color: PALETTE[r.colors[r.col]!], bold: true }] : []),
         ...chips(r.refs, PALETTE[r.colors[r.col]!], ctx.marks),
         ...(r.c.p.length > 1 ? mergeLabel(r) : [{ t: r.c.s }]),
       ],
       age: age(r.c.t, now),
     }
   }
-  // HEAD 바로 위에 둔다. HEAD로 들어오는 다른 레인은 그대로 이어 그린다.
+  // HEAD 바로 위에 흐린 커밋 기호로 두고 HEAD와 잇는다. HEAD로 들어오는 다른 레인은 그대로 이어 그린다.
   const wip = (head: Laid): Row => {
     const graph: Seg[] = []
     for (let i = 0; i < width; i++) {
-      graph.push(i === head.col ? { t: '◌', dim: true } : head.before[i] ? { t: '│', color: PALETTE[head.colors[i]!] } : { t: ' ' })
+      graph.push(i === head.col ? { t: NODE[head.before[i] ? 3 : 1]!, color: PALETTE[head.colors[i]!], dim: true } : head.before[i] ? { t: '│', color: PALETTE[head.colors[i]!] } : { t: ' ' })
       if (i < width - 1) graph.push({ t: ' ' })
     }
     return { key: 'w:wip', wip: true, graph, label: [{ t: '작업 중 변경 ', dim: true }, { t: `${ctx.wip}개`, bold: true }], age: '' }
