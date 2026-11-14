@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { buildRows, fit, parseLog, releases, trimGraphs } from '../hooks/graph'
-import { keepInView, promptList } from '../hooks/register'
+import { promptList, scrolled, stepped, windowStart } from '../hooks/register'
 
 // 시험 환경에는 있지만 타입 정의(lib)에는 없는 전역 함수
 declare const setTimeout: (fn: (value?: unknown) => void, ms: number) => unknown
@@ -104,14 +104,24 @@ test('한글은 2칸으로 세어 자르고 오른쪽 끝에 시각을 붙인다
   expect(line.map(s => s.t).join('')).toBe('가나다… 2d')
 })
 
-test('커서 아래위로 누를 수 있는 줄이 여유 있게 보이도록 창을 옮긴다', () => {
-  // 높이 10이면 위아래로 2줄씩 여유를 둔다. 연결선처럼 누를 수 없는 줄은 여유로 세지 않는다.
-  const rows = Array.from({ length: 30 }, (_, i) => ({ key: `c:${i}`, hash: String(i), graph: [], label: [], age: '' }))
-  expect(keepInView(rows, 9, 0, 10)).toBe(2)
-  expect(keepInView(rows, 3, 5, 10)).toBe(1)
-  expect(keepInView(rows, 29, 0, 10)).toBe(20)
+test('커서가 창 안에서 움직이면 창은 그대로고, 끝에서 더 나가면 한 줄씩 옮긴다', () => {
+  const row = (k: string) => ({ key: `c:${k}`, hash: k, graph: [], label: [], age: '' })
+  const rows = Array.from({ length: 30 }, (_, i) => row(String(i)))
+  // 커서 c:9가 창의 9번째 자리면 창은 0부터
+  expect(windowStart(rows, { cur: 'c:9', off: 9, start: 0 }, 10)).toBe(0)
+  // 새 커밋 2개가 위에 생겨도 커서는 같은 자리, 같은 커밋에 남는다
+  expect(windowStart([row('n1'), row('n2'), ...rows], { cur: 'c:9', off: 9, start: 0 }, 10)).toBe(2)
+  // 아래 끝에서 한 줄 더 내리면 c:10이 마지막 자리에 오도록 창을 1줄 옮긴다
+  expect(stepped(rows, { cur: 'c:9', off: 9, start: 0 }, 10, 1)).toEqual({ cur: 'c:10', off: 9, start: 1 })
+  // 위 끝에서 한 줄 더 올리면 반대로
+  expect(stepped(rows, { cur: 'c:5', off: 0, start: 5 }, 10, -1)).toEqual({ cur: 'c:4', off: 0, start: 4 })
+  // 더 갈 줄이 없으면 그대로
+  expect(stepped(rows, { cur: 'c:29', off: 9, start: 20 }, 10, 1)).toBeUndefined()
+  // 연결선처럼 누를 수 없는 줄은 건너뛴다
   const gaps = rows.map((r, i) => (i % 2 ? { key: `x:${i}`, graph: [], label: [], age: '' } : r))
-  expect(keepInView(gaps, 8, 0, 10)).toBe(3)
+  expect(stepped(gaps, { cur: 'c:8', off: 8, start: 0 }, 10, 1)).toEqual({ cur: 'c:10', off: 9, start: 1 })
+  // 한 화면 넘기기는 창을 옮기고 커서를 화면의 같은 자리에 둔다
+  expect(scrolled(rows, { cur: 'c:3', off: 3, start: 0 }, 10, 9)).toEqual({ cur: 'c:12', off: 3, start: 9 })
 })
 
 test('패널에 브랜치와 그래프를 그리고, 접힌 구간을 누르면 펼친다', async ($, on) => {
@@ -223,36 +233,42 @@ test('맨 아래 안내는 포커스 상태를 따르고, /git-graph는 패널�
   await inside.unmount()
 })
 
-test('커서가 창 아래쪽으로 가면 그래프가 따라 스크롤된다', async ($, on) => {
+test('방향키로 창 끝에서 더 나가면 그래프가 한 줄씩 스크롤되고, 단축키 버튼으로는 넘어가지 않는다', async ($, on) => {
   // 태그가 붙은 커밋 40개: 접히지 않고 모두 한 줄씩 보인다.
   const many = Array.from({ length: 40 }, (_, i) => rec(`h${i}`, i < 39 ? `h${i + 1}` : '', `tag: refs/tags/t${i}${i ? '' : ', HEAD -> refs/heads/main'}`, `커밋 ${i}`)).join('')
   on('command.register', () => ({ value: { command: 'git-graph' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.focus', () => ({}))
   on('clock.every', () => ({ deny: '시험에서는 타이머를 쓰지 않는다' }))
+  on('clock.after', () => ({ deny: '시험에서는 타이머를 쓰지 않는다' }))
   on('clock.now', () => ({ value: 1700000000 * 1000 }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('process.run', (_, e) => ({
     value: { exitCode: 0, stdout: e.argv.includes('log') ? many : '## main\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
+  const move = (element: string) => $.ui.focus({ component: 'Pane', requestId: 'git-graph', element, origin: { kind: 'person' } })
+  const drawn = async (keys: string[]) => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const out = await Promise.all(keys.map(async k => !!(await ui.find({ key: k }))))
+    await ui.unmount()
+    return out
+  }
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ key: 'c:h0' })).toBeDefined()
-  expect(await ui.find({ key: 'c:h20' })).toBeUndefined()
-  await ui.unmount()
-
-  const move = (element: string) => $.ui.focus({ component: 'Pane', requestId: 'git-graph', element, origin: { kind: 'person' } })
-  await move('c:h20')
-  // 방향키로 단축키 버튼에 가려는 이동은 막고, 커서는 그대로 둔다.
+  // 그래프 영역은 14줄(24 - 위 2 - 경계 줄 2 - 상세 3 - 단축키와 안내 3)이라 h0~h13이 보인다.
+  expect(await drawn(['c:h0', 'c:h13', 'c:h14'])).toEqual([true, true, false])
+  // 창 안에서 움직이면 창은 그대로다.
+  await move('c:h13')
+  expect(await drawn(['c:h0', 'c:h13'])).toEqual([true, true])
+  // 단축키 버튼으로 가려는 이동은 막는다.
   expect(await move('act:x')).toEqual({})
-  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  // 그래프 영역은 15줄(24 - 위 2 - 아래 3 - 상세 4), 여유는 3줄이라 9~23번째 줄이 보인다.
-  expect(await ui.find({ key: 'c:h20' })).toBeDefined()
-  expect(await ui.find({ key: 'c:h23' })).toBeDefined()
-  expect(await ui.find({ key: 'c:h24' })).toBeUndefined()
-  expect(await ui.find({ key: 'c:h8' })).toBeUndefined()
-  await ui.unmount()
+  // 아래 끝에서 더 내리면(경계 줄로 가려 하면) 한 줄 스크롤된다.
+  expect(await move('edge:bottom')).toEqual({})
+  expect(await drawn(['c:h0', 'c:h1', 'c:h14'])).toEqual([false, true, true])
+  // 위 끝에서 더 올리면 반대로 스크롤된다.
+  await move('c:h1')
+  await move('edge:top')
+  expect(await drawn(['c:h0', 'c:h14'])).toEqual([true, false])
 })
 
 test('커서가 커밋 줄에 가면 아래에 그 커밋의 상세가 나오고, 한 번 읽은 커밋은 다시 읽지 않는다', async ($, on) => {

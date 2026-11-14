@@ -356,6 +356,17 @@ const cw = (ch: string) => {
 }
 export const width = (s: string) => [...s].reduce((n, ch) => n + cw(ch), 0)
 
+// 색과 모양이 같은 이웃 구간을 하나로 합친다.
+export function merge(segs: Seg[]): Seg[] {
+  const out: Seg[] = []
+  for (const s of segs) {
+    const p = out[out.length - 1]
+    if (p && p.color === s.color && p.dim === s.dim && p.bold === s.bold && p.inverse === s.inverse && p.underline === s.underline) p.t += s.t
+    else out.push({ ...s })
+  }
+  return out
+}
+
 // 왼쪽 구간을 cols칸에 맞춰 자르고, 오른쪽 끝에 right를 붙인다.
 export function fit(left: Seg[], right: Seg[], cols: number): Seg[] {
   const rw = right.reduce((n, s) => n + width(s.t), 0)
