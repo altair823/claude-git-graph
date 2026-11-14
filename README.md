@@ -84,11 +84,14 @@ fetch는 하지 않는다. 원격 정보는 마지막 fetch 시점의 상태이�
 
 ## 설치
 
-`altair-skills` 마켓플레이스에 들어 있다.
+이 저장소가 마켓플레이스를 겸한다. 셸에서 다음 두 줄을 실행한 뒤, 세션에서 `/reload-plugins`를 하거나 새 세션을 연다.
 
 ```
-claude plugin install git-graph@altair-skills
+claude plugin marketplace add https://gitea.altair823.xyz/altair823-org/claude-git-graph.git
+claude plugin install git-graph@claude-git-graph
 ```
+
+설치본은 `release` 브랜치(CI가 시험을 통과한 커밋만 릴리스)를 받는다. 새 버전은 mod가 스스로 확인해 받아 둔다(아래 "새 버전" 참고). `altair-skills` 마켓플레이스를 쓰는 컴퓨터는 `git-graph@altair-skills`로도 설치할 수 있다.
 
 요구 사항은 git 2.31 이상(`--path-format=absolute`, `--diff-merges`를 쓴다)과 mod를 지원하는 Claude Code(2.1.325에서 확인)다.
 
@@ -109,3 +112,7 @@ claude plugin test .
 4. 마지막 릴리스 뒤로 `hooks/`, `types/`가 바뀌지 않았으면 릴리스하지 않는다. 문서만 바뀐 push는 CI도 돌지 않는다.
 
 설치본은 마켓플레이스가 가리키는 `release` 브랜치만 받으므로, 시험을 통과해 릴리스된 코드만 `claude plugin update git-graph@altair-skills`로 들어온다. 다음 버전을 미리 보려면 `DRY_RUN=1 scripts/ci-release.sh`를 실행한다.
+
+## 라이선스
+
+MIT

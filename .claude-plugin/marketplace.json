@@ -1,0 +1,18 @@
+{
+  "name": "claude-git-graph",
+  "owner": {
+    "name": "altair823"
+  },
+  "description": "Claude Code 오른쪽 패널에 git 커밋 그래프를 보여 주는 mod",
+  "plugins": [
+    {
+      "name": "git-graph",
+      "description": "Claude Code 오른쪽 패널에 현재 저장소의 git 커밋 그래프를 보여 준다(release 브랜치, CI가 시험을 통과한 커밋만 릴리스한다)",
+      "source": {
+        "source": "url",
+        "url": "https://gitea.altair823.xyz/altair823-org/claude-git-graph.git",
+        "ref": "release"
+      }
+    }
+  ]
+}
