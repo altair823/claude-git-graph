@@ -178,3 +178,27 @@ test('쓰기 도구가 끝나면 바로 다시 읽고, 브랜치와 태그가 �
   await settle()
   expect(runs).toEqual({ status: 3, log: 2 })
 })
+
+test('맨 아래 안내는 포커스 상태를 따르고, /git-graph는 패널로 포커스를 요청한다', async ($, on) => {
+  const opened: unknown[] = []
+  on('command.register', () => ({ value: { command: 'git-graph' } }))
+  on('ui.open', (_, e) => (opened.push(e), { value: { isPlaced: true } }))
+  on('clock.every', () => ({ deny: '시험에서는 타이머를 쓰지 않는다' }))
+  on('clock.now', () => ({ value: 1700000000 * 1000 }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_, e) => ({
+    value: { exitCode: 0, stdout: e.argv.includes('log') ? LOG : '## main\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('command.run', () => ({ text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'git-graph', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  expect(opened.at(-1)).toMatchObject({ id: 'git-graph', focus: true })
+
+  const away = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await away.find({ type: 'Text', text: /또는 클릭으로 들어오기/ })).toBeDefined()
+  await away.unmount()
+  const inside = await $.ui.mount({ ...PANE, props: { ...PANE.props, isFocused: true }, surface: 'terminal' })
+  expect(await inside.find({ type: 'Text', text: /Esc 입력창으로/ })).toBeDefined()
+  await inside.unmount()
+})

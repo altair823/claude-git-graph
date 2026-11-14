@@ -179,7 +179,8 @@ export function keepInView(rows: Row[], i: number, start: number, height: number
   return clamp(s, 0, Math.max(0, rows.length - height))
 }
 
-const open = ($: EngineInterface) => $.ui.open({ id: PANE, title: 'Git' })
+// focus는 요청이다. 입력창이 비어 있을 때만 받아들여지므로 /git-graph를 보낸 직후에는 패널로 키보드가 옮겨진다.
+const open = ($: EngineInterface, focus?: true) => $.ui.open({ id: PANE, title: 'Git', ...(focus && { focus }) })
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -198,8 +199,8 @@ export const register: Register = on => {
 
   on('command.run', { command: 'git-graph' }, async $ => {
     await refresh($)
-    await open($)
-    return { text: 'git 그래프 패널을 열었습니다.' }
+    await open($, true)
+    return { text: 'git 그래프 패널을 열었습니다. Esc로 입력창에 돌아옵니다.' }
   })
 
   // 읽기 전용이 아닌 도구가 끝나면 바로 반영한다. 커밋, 브랜치 전환, 파일 수정이 여기에 해당하고 하위 에이전트의 도구도 포함된다.
@@ -237,10 +238,11 @@ export const register: Register = on => {
     // 마지막 칸에 글자를 쓰면 줄이 넘어갈 수 있어 한 칸 남긴다.
     const cols = Math.max(20, e.props.bodyColumns - 1)
     const total = Math.max(4, e.props.scroll.bodyRows)
-    // 위 2줄(브랜치, 릴리스), 아래 단축키 2줄, 그 위 상세 4줄. 패널이 낮으면 상세부터 뺀다.
+    // 위 2줄(브랜치, 릴리스), 아래 단축키 2줄과 안내 1줄, 그 위 상세 4줄. 패널이 낮으면 상세부터 뺀다.
     const hasActions = total >= 10
     const hasDetail = total >= 20
-    lastRows = total - 2 - (hasActions ? 2 : 0) - (hasDetail ? 4 : 0)
+    lastRows = total - 2 - (hasActions ? 3 : 0) - (hasDetail ? 4 : 0)
+    const focused = e.props.isFocused
 
     const seg = (s: Seg, bg?: string) => (
       <Text color={s.color} dimColor={s.dim} weight={s.bold && 'bold'} inverse={s.inverse} underline={s.underline} backgroundColor={bg}>
@@ -293,7 +295,7 @@ export const register: Register = on => {
       } else if (v.sel) {
         foot.push([{ t: '불러오는 중', dim: true }], [], [])
       } else {
-        foot.push([{ t: '↑↓ 이동  Enter 펼치기, 상세  Esc 입력창으로', dim: true }], [{ t: 'x로 여러 개 고른 뒤 p나 숫자로 입력창에 넣기', dim: true }], [])
+        foot.push([{ t: 'Enter로 커밋을 열면 여기에 내용이 나옵니다', dim: true }], [{ t: 'x로 여러 개 고른 뒤 p나 숫자로 입력창에 넣기', dim: true }], [])
       }
     }
     // 단축키는 패널이 키보드를 가지고 있을 때 동작한다. 고른 것이 없으면 커서가 있는 줄을 쓴다.
@@ -301,6 +303,12 @@ export const register: Register = on => {
       <Button key={`act:${hotkey}`} plain hotkey={hotkey} onPress={() => void onPress()}>{label}</Button>
     )
     const gap = <Text>  </Text>
+    // 패널에 들어오면 커서는 마지막 위치에서, 처음이면 첫 줄에서 시작한다.
+    const ring = shown.some(r => r.key === v.cur) ? v.cur : shown.find(pressable)?.key
+    // 키보드가 어디 있는지에 따라 맨 아래 안내를 바꾼다.
+    const hint: Seg[] = focused
+      ? [{ t: '↑↓ 이동  Enter 열기  Esc 입력창으로  ctrl+x x 닫기', dim: true }]
+      : [{ t: 'ctrl+x tab', color: 'cyan' }, { t: ' 또는 클릭으로 들어오기  ', dim: true }, { t: '/git-graph', color: 'cyan' }]
 
     return (
       <Box flexDirection="column">
@@ -310,7 +318,7 @@ export const register: Register = on => {
           const bg = row.hash && row.hash === v.sel ? 'subtle' : undefined
           const kids = fit([...row.graph, { t: '  ' }, ...row.label], row.age ? [{ t: row.age, dim: true }] : [], cols).map(s => seg(s, bg))
           return pressable(row) ? (
-            <Button key={row.key} plain onPress={() => void press(row)}>{kids}</Button>
+            <Button key={row.key} plain autoFocus={row.key === ring || undefined} onPress={() => void press(row)}>{kids}</Button>
           ) : (
             <Text>{kids}</Text>
           )
@@ -330,6 +338,7 @@ export const register: Register = on => {
             <Text dimColor>{v.marks.length ? `고른 것 ${v.marks.length}개` : '고른 것 없음'}</Text>
           </Box>
         )}
+        {hasActions && <Text>{fit(hint, [], cols).map(s => seg(s))}</Text>}
       </Box>
     )
   })
