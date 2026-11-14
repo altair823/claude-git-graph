@@ -254,3 +254,40 @@ test('커서가 창 아래쪽으로 가면 그래프가 따라 스크롤된다',
   expect(await ui.find({ key: 'c:h8' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('커서가 커밋 줄에 가면 아래에 그 커밋의 상세가 나오고, 한 번 읽은 커밋은 다시 읽지 않는다', async ($, on) => {
+  let shows = 0
+  on('command.register', () => ({ value: { command: 'git-graph' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.focus', () => ({}))
+  on('clock.every', () => ({ deny: '시험에서는 타이머를 쓰지 않는다' }))
+  on('clock.after', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: 1700003600 * 1000 }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_, e) => {
+    if (e.argv.includes('show')) shows++
+    const stdout = e.argv.includes('show')
+      ? `나\x1f1700000000\x1f${e.argv.at(-1) === 'top' ? 'IRC 경로 수정' : '첫 커밋'}\n\n 3 files changed, 42 insertions(+), 7 deletions(-)\n`
+      : e.argv.includes('log') ? LOG : '## main\n'
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const move = (element: string) => $.ui.focus({ component: 'Pane', requestId: 'git-graph', element, origin: { kind: 'person' } })
+  const settle = () => new Promise(r => setTimeout(r, 20))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await move('c:top')
+  await settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /IRC 경로 수정/ }))?.text.trim()).toBe('IRC 경로 수정')
+  expect((await ui.find({ type: 'Text', text: /1시간 전/ }))?.text).toContain('나  1시간 전')
+  await ui.unmount()
+
+  await move('c:c')
+  await settle()
+  await move('c:top')
+  await settle()
+  expect(shows).toBe(2)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /IRC 경로 수정/ })).toBeDefined()
+  await ui.unmount()
+})

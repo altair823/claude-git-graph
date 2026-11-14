@@ -16,9 +16,9 @@ export type Repo = {
   error?: string
 }
 
-// open: 펼친 구간 id, sel: 상세를 보는 커밋, cur: 커서가 있는 줄의 key, start: 그래프 영역의 첫 줄,
-// marks: x로 고른 것(c:<해시> 또는 b:<브랜치>)
-export type View = { open: string[]; sel: string; cur: string; start: number; marks: string[] }
+// open: 펼친 구간 id, cur: 커서가 있는 줄의 key(커밋 줄이면 그 커밋의 상세를 보여 준다),
+// start: 그래프 영역의 첫 줄, marks: x로 고른 것(c:<해시> 또는 b:<브랜치>)
+export type View = { open: string[]; cur: string; start: number; marks: string[] }
 
 export type Detail = { h: string; author: string; t: number; s: string; files: number; add: number; del: number }
 

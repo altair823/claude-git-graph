@@ -10,7 +10,7 @@ const LIMIT = 500
 // 저장 형태가 바뀌면 shape 값을 올린다. 이전 버전이 저장한 값은 버려진다.
 const EMPTY: Repo = { branch: '', changes: 0, name: '', commits: [], more: false, track: {}, fetched: 0 }
 const repo = atom({ plugin: 'git-graph', key: 'repo' } as const, EMPTY, { shape: 'repo-2' })
-const view = atom({ plugin: 'git-graph', key: 'view' } as const, { open: [], sel: '', cur: '', start: 0, marks: [] } as View, { shape: 'view-2' })
+const view = atom({ plugin: 'git-graph', key: 'view' } as const, { open: [], cur: '', start: 0, marks: [] } as View, { shape: 'view-3' })
 const detail = atom({ plugin: 'git-graph', key: 'detail' } as const, { h: '', author: '', t: 0, s: '', files: 0, add: 0, del: 0 } as Detail, { shape: 'detail-1' })
 
 const LOG = [
@@ -97,19 +97,31 @@ async function refresh($: EngineInterface) {
 
 const isOpen = async ($: EngineInterface) => (await $.ui.panes()).some(p => p.id === PANE)
 
-async function select($: EngineInterface, h: string) {
-  await update($, view, v => ({ ...v, cur: `c:${h}`, sel: v.sel === h ? '' : h }))
-  if ((await read($, view)).sel !== h) return
+// 커서가 간 커밋의 상세. 키를 누르고 있을 때 git이 쌓이지 않도록 커서가 잠깐 멈춘 뒤에 읽고, 읽은 것은 기억한다.
+// ponytail: 해시별 기억은 모듈을 다시 불러오면 비워진다.
+const details = new Map<string, Detail>()
+let pending: { cancel: () => void } | undefined
+async function showDetail($: EngineInterface, h: string) {
+  const hit = details.get(h)
+  pending?.cancel()
+  if (hit) return void (await update($, detail, () => hit))
+  pending = $.clock.after(150, () => void loadDetail($, h).catch(() => {}))
+}
+
+async function loadDetail($: EngineInterface, h: string) {
+  if ((await read($, view)).cur !== `c:${h}`) return
   const out = await $.process.run([
     'git', 'show', '--no-show-signature', '--diff-merges=first-parent', '--shortstat',
     '--format=%an%x1f%ct%x1f%s', h,
   ])
   const [author = '', t = '0', s = ''] = (out.stdout.split('\n')[0] ?? '').split('\x1f')
   const num = (re: RegExp) => Number(re.exec(out.stdout)?.[1] ?? 0)
-  await update($, detail, () => ({
+  const d: Detail = {
     h, author, t: Number(t), s,
     files: num(/(\d+) files? changed/), add: num(/(\d+) insertions?/), del: num(/(\d+) deletions?/),
-  }))
+  }
+  details.set(h, d)
+  await update($, detail, () => d)
 }
 
 async function rowsOf($: EngineInterface, now?: number): Promise<Row[]> {
@@ -239,6 +251,7 @@ export const register: Register = on => {
     const rows = await rowsOf($)
     const i = rows.findIndex(r => r.key === key)
     if (i >= 0) await update($, view, v => ({ ...v, cur: key, start: keepInView(rows, i, v.start, lastRows) }))
+    if (key.startsWith('c:')) await showDetail($, key.slice(2))
     return done
   })
 
@@ -261,8 +274,8 @@ export const register: Register = on => {
     lastRows = total - 2 - (hasActions ? 3 : 0) - (hasDetail ? 4 : 0)
     const focused = e.props.isFocused
 
-    const seg = (s: Seg, bg?: string) => (
-      <Text color={s.color} dimColor={s.dim} weight={s.bold && 'bold'} inverse={s.inverse} underline={s.underline} backgroundColor={bg}>
+    const seg = (s: Seg) => (
+      <Text color={s.color} dimColor={s.dim} weight={s.bold && 'bold'} inverse={s.inverse} underline={s.underline}>
         {s.t}
       </Text>
     )
@@ -289,21 +302,22 @@ export const register: Register = on => {
     const rows = await rowsOf($, now)
     const start = clamp(v.start, 0, Math.max(0, rows.length - lastRows))
     const shown = trimGraphs(rows.slice(start, start + lastRows))
-    const press = (row: Row) => {
+    // Enter와 클릭: 접힌 줄은 펼치거나 접는다. 커밋 줄은 커서를 옮기는 것과 같다(클릭으로 키보드가 넘어오지 않아도 상세는 바뀐다).
+    const press = async (row: Row) => {
       void focusPane($, row.key)
-      return row.fold
-        ? update($, view, x => ({
-            ...x,
-            cur: row.key,
-            open: x.open.includes(row.fold!) ? x.open.filter(f => f !== row.fold) : [...x.open, row.fold!],
-          }))
-        : select($, row.hash!)
+      await update($, view, x => ({
+        ...x,
+        cur: row.key,
+        open: !row.fold ? x.open : x.open.includes(row.fold) ? x.open.filter(f => f !== row.fold) : [...x.open, row.fold],
+      }))
+      if (row.hash) await showDetail($, row.hash)
     }
+    const curRow = rows.find(r => r.key === v.cur)
 
     const foot: Seg[][] = []
     if (hasDetail) {
       foot.push([{ t: '─'.repeat(cols), dim: true }])
-      if (v.sel && d.h === v.sel) {
+      if (curRow?.hash && d.h === curRow.hash) {
         foot.push(
           fit([{ t: d.h.slice(0, 7), color: 'yellow' }, { t: `  ${d.author}  ${ageLong(d.t, now)}`, dim: true }], [], cols),
           fit([{ t: d.s, bold: true }], [], cols),
@@ -311,10 +325,13 @@ export const register: Register = on => {
             ? [{ t: `파일 ${d.files}개  `, dim: true }, { t: `+${d.add}`, color: 'green' }, { t: '  ' }, { t: `-${d.del}`, color: 'red' }]
             : [{ t: '변경 없음', dim: true }],
         )
-      } else if (v.sel) {
+      } else if (curRow?.hash) {
         foot.push([{ t: '불러오는 중', dim: true }], [], [])
+      } else if (curRow?.fold) {
+        const isOpen = v.open.includes(curRow.fold)
+        foot.push(fit(curRow.label, [], cols), [{ t: isOpen ? 'Enter나 클릭으로 접기' : 'Enter나 클릭으로 펼치기', dim: true }], [])
       } else {
-        foot.push([{ t: 'Enter로 커밋을 열면 여기에 내용이 나옵니다', dim: true }], [{ t: 'x로 여러 개 고른 뒤 p나 숫자로 입력창에 넣기', dim: true }], [])
+        foot.push([{ t: '커서가 있는 커밋의 내용이 여기에 나옵니다', dim: true }], [{ t: 'x로 여러 개 고른 뒤 p나 숫자로 입력창에 넣기', dim: true }], [])
       }
     }
     // 단축키는 패널이 키보드를 가지고 있을 때 동작한다. 고른 것이 없으면 커서가 있는 줄을 쓴다.
@@ -326,7 +343,7 @@ export const register: Register = on => {
     const ring = shown.some(r => r.key === v.cur) ? v.cur : shown.find(pressable)?.key
     // 키보드가 어디 있는지에 따라 맨 아래 안내를 바꾼다.
     const hint: Seg[] = focused
-      ? [{ t: '↑↓ 이동  Enter 열기  Esc 입력창으로  ctrl+x x 닫기', dim: true }]
+      ? [{ t: '↑↓ 이동  Enter 펼치기  Esc 입력창으로  ctrl+x x 닫기', dim: true }]
       : [{ t: 'ctrl+x tab', color: 'cyan' }, { t: ' 또는 클릭으로 들어오기  ', dim: true }, { t: '/git-graph', color: 'cyan' }]
 
     return (
@@ -334,8 +351,7 @@ export const register: Register = on => {
         <Text>{header.map(s => seg(s))}</Text>
         <Text>{header2.map(s => seg(s))}</Text>
         {shown.map(row => {
-          const bg = row.hash && row.hash === v.sel ? 'subtle' : undefined
-          const kids = fit([...row.graph, { t: '  ' }, ...row.label], row.age ? [{ t: row.age, dim: true }] : [], cols).map(s => seg(s, bg))
+          const kids = fit([...row.graph, { t: '  ' }, ...row.label], row.age ? [{ t: row.age, dim: true }] : [], cols).map(s => seg(s))
           return pressable(row) ? (
             <Button key={row.key} plain autoFocus={row.key === ring || undefined} onPress={() => void press(row)}>{kids}</Button>
           ) : (
