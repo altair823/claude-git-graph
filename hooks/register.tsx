@@ -42,10 +42,27 @@ async function load($: EngineInterface): Promise<Repo> {
   }
 }
 
+// 갱신이 겹치면 하나로 합친다. 도는 중에 다시 요청되면 끝난 뒤 한 번 더 읽어 마지막 상태를 남긴다.
+let busy = false
+let again = false
 async function refresh($: EngineInterface) {
-  const next = await load($)
-  if (JSON.stringify(next) !== JSON.stringify(await read($, repo))) await update($, repo, () => next)
+  if (busy) {
+    again = true
+    return
+  }
+  busy = true
+  try {
+    do {
+      again = false
+      const next = await load($)
+      if (JSON.stringify(next) !== JSON.stringify(await read($, repo))) await update($, repo, () => next)
+    } while (again)
+  } finally {
+    busy = false
+  }
 }
+
+const isOpen = async ($: EngineInterface) => (await $.ui.panes()).some(p => p.id === PANE)
 
 async function select($: EngineInterface, h: string) {
   await update($, view, v => ({ ...v, cur: `c:${h}`, sel: v.sel === h ? '' : h }))
@@ -94,11 +111,11 @@ export const register: Register = on => {
     await $.command.register({ name: 'git-graph', description: 'git 커밋 그래프 패널 열기' })
     await refresh($)
     if (!(await read($, repo)).error) void open($)
-    // ponytail: 5초마다 git을 다시 읽는다. 큰 저장소에서 느려지면 .git 변경 감시로 바꾼다.
+    // ponytail: 2초마다 git을 다시 읽는다(한 번에 수십 ms). 큰 저장소에서 느려지면 .git 변경 감시로 바꾼다.
     const tick = async () => {
-      if ((await $.ui.panes()).some(p => p.id === PANE)) await refresh($)
+      if (await isOpen($)) await refresh($)
     }
-    $.clock.every(5000, () => void tick().catch(() => {}))
+    $.clock.every(2000, () => void tick().catch(() => {}))
     return started
   })
 
@@ -108,12 +125,16 @@ export const register: Register = on => {
     return { text: 'git 그래프 패널을 열었습니다.' }
   })
 
-  // Claude가 Bash로 커밋하거나 브랜치를 바꾸면 바로 반영한다.
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+  // 읽기 전용이 아닌 도구가 끝나면 바로 반영한다. 커밋, 브랜치 전환, 파일 수정이 여기에 해당하고 하위 에이전트의 도구도 포함된다.
+  on('tool.call', async ($, e, next) => {
     const ran = await next(e)
-    void refresh($).catch(() => {})
+    if (!ran.isReadOnly) {
+      void isOpen($)
+        .then(open => (open ? refresh($) : undefined))
+        .catch(() => {})
+    }
     return ran
-  })
+  }).catch(($, e, next) => next(e)) // 실패해도 도구 결과를 그대로 넘긴다. next를 이미 불렀으면 그 결과를 다시 쓴다.
 
   // 방향키나 클릭으로 커서가 움직이면 기록하고, 창 밖으로 나가지 않게 한다.
   on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {

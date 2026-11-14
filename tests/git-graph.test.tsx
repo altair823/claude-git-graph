@@ -3,6 +3,9 @@ import { expect, test } from 'claude-code/testing'
 import { buildRows, fit, parseLog, trimGraphs } from '../hooks/graph'
 import { keepInView } from '../hooks/register'
 
+// 시험 환경에는 있지만 타입 정의(lib)에는 없는 전역 함수
+declare const setTimeout: (fn: (value?: unknown) => void, ms: number) => unknown
+
 const PANE = {
   plugin: 'git-graph',
   component: 'Pane',
@@ -110,4 +113,30 @@ test('git 저장소가 아니면 안내만 그린다', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text' }))?.text).toBe('git 저장소가 아닙니다')
   await ui.unmount()
+})
+
+test('읽기 전용이 아닌 도구가 끝나면 그래프를 바로 다시 읽는다', async ($, on) => {
+  let logs = 0
+  on('command.register', () => ({ value: { command: 'git-graph' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [{ id: 'git-graph', title: 'Git', isShown: true, isFocused: false, isPlaced: true }] }))
+  // 즉시 응답하면 타이머가 쉬지 않고 돌므로 시험에서는 거절해 멈춘다.
+  on('clock.every', () => ({ deny: '시험에서는 타이머를 쓰지 않는다' }))
+  on('clock.now', () => ({ value: 1700000000 * 1000 }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_, e) => {
+    if (e.argv.includes('log')) logs++
+    return { value: { exitCode: 0, stdout: e.argv.includes('log') ? LOG : '## main\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('tool.call', (_, e) => (e.tool === 'Read' ? { result: {}, isReadOnly: true } : { result: {} }))
+  const settle = () => new Promise(r => setTimeout(r, 20))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const base = logs
+  await $.tool.call({ tool: 'Read', file_path: '/a' })
+  await settle()
+  expect(logs).toBe(base)
+  await $.tool.call({ tool: 'Edit', file_path: '/a', old_string: 'x', new_string: 'y' })
+  await settle()
+  expect(logs).toBe(base + 1)
 })
