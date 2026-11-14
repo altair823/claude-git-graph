@@ -115,8 +115,9 @@ test('git 저장소가 아니면 안내만 그린다', async ($, on) => {
   await ui.unmount()
 })
 
-test('읽기 전용이 아닌 도구가 끝나면 그래프를 바로 다시 읽는다', async ($, on) => {
-  let logs = 0
+test('쓰기 도구가 끝나면 바로 다시 읽고, 브랜치와 태그가 그대로면 git log는 건너뛴다', async ($, on) => {
+  const runs = { status: 0, log: 0 }
+  let refs = 'aaa refs/heads/main\n'
   on('command.register', () => ({ value: { command: 'git-graph' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.panes', () => ({ value: [{ id: 'git-graph', title: 'Git', isShown: true, isFocused: false, isPlaced: true }] }))
@@ -125,18 +126,26 @@ test('읽기 전용이 아닌 도구가 끝나면 그래프를 바로 다시 읽
   on('clock.now', () => ({ value: 1700000000 * 1000 }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('process.run', (_, e) => {
-    if (e.argv.includes('log')) logs++
-    return { value: { exitCode: 0, stdout: e.argv.includes('log') ? LOG : '## main\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    const cmd = e.argv[1] === '--no-optional-locks' ? 'status' : e.argv[1]
+    if (cmd === 'status') runs.status++
+    if (cmd === 'log') runs.log++
+    const stdout = cmd === 'status' ? '## main\n' : cmd === 'for-each-ref' ? refs : cmd === 'rev-parse' ? '/r/kkachi\nbbb\n' : LOG
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('tool.call', (_, e) => (e.tool === 'Read' ? { result: {}, isReadOnly: true } : { result: {} }))
   const settle = () => new Promise(r => setTimeout(r, 20))
+  const edit = () => $.tool.call({ tool: 'Edit', file_path: '/a', old_string: 'x', new_string: 'y' })
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  const base = logs
+  expect(runs).toEqual({ status: 1, log: 1 })
   await $.tool.call({ tool: 'Read', file_path: '/a' })
   await settle()
-  expect(logs).toBe(base)
-  await $.tool.call({ tool: 'Edit', file_path: '/a', old_string: 'x', new_string: 'y' })
+  expect(runs).toEqual({ status: 1, log: 1 })
+  await edit()
   await settle()
-  expect(logs).toBe(base + 1)
+  expect(runs).toEqual({ status: 2, log: 1 })
+  refs = 'ccc refs/heads/main\n'
+  await edit()
+  await settle()
+  expect(runs).toEqual({ status: 3, log: 2 })
 })

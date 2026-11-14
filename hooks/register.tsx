@@ -20,23 +20,34 @@ const LOG = [
 ]
 // --no-optional-locks: 주기적으로 돌아도 index.lock을 잡지 않아 다른 git 작업과 충돌하지 않는다.
 const STATUS = ['git', '--no-optional-locks', 'status', '--porcelain=v1', '--branch']
-const TOP = ['git', 'rev-parse', '--show-toplevel']
+// 저장소 위치와 HEAD, 모든 브랜치와 태그가 가리키는 커밋. 둘 다 그대로면 이력도 그대로라 git log를 건너뛴다.
+const TOP = ['git', 'rev-parse', '--show-toplevel', 'HEAD']
+const REFS = ['git', 'for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/remotes', 'refs/tags']
 
 // ponytail: 마지막으로 그린 그래프 영역의 높이. 모듈을 다시 불러오면 다음 그리기에서 다시 맞춰진다.
 let lastRows = 20
 
+// 마지막으로 git log를 읽었을 때의 저장소 위치, HEAD, ref 목록. 모듈을 다시 불러오면 한 번 전체를 읽는다.
+let lastRefs = ''
+
 async function load($: EngineInterface): Promise<Repo> {
   const empty: Repo = { branch: '', changes: 0, name: '', commits: [], more: false }
   try {
-    const [status, log, top] = await Promise.all([$.process.run(STATUS), $.process.run(LOG), $.process.run(TOP)])
+    const [status, top, refs] = await Promise.all([$.process.run(STATUS), $.process.run(TOP), $.process.run(REFS)])
     if (status.exitCode !== 0) return { ...empty, error: 'git 저장소가 아닙니다' }
     const [head = '', ...changes] = status.stdout.split('\n').filter(Boolean)
     const m = /^## (?:No commits yet on )?([^.\s]+)(?:\.\.\.\S+)?(?: \[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\])?/.exec(head)
     const branch = [m?.[1] ?? head.slice(3), m?.[2] && `↑${m[2]}`, m?.[3] && `↓${m[3]}`].filter(Boolean).join(' ')
-    const name = top.stdout.trim().split('/').pop() ?? ''
-    if (log.exitCode !== 0) return { ...empty, branch, name, changes: changes.length, error: log.stderr.split('\n')[0] }
+    const name = top.stdout.split('\n')[0]?.trim().split('/').pop() ?? ''
+    const base = { branch, name, changes: changes.length }
+    const key = top.stdout + refs.stdout
+    const prev = await read($, repo)
+    if (key === lastRefs && !prev.error) return { ...prev, ...base }
+    const log = await $.process.run(LOG)
+    if (log.exitCode !== 0) return { ...empty, ...base, error: log.stderr.split('\n')[0] }
+    lastRefs = key
     const commits = parseLog(log.stdout)
-    return { branch, changes: changes.length, name, commits, more: commits.length >= LIMIT }
+    return { ...base, commits, more: commits.length >= LIMIT }
   } catch (err) {
     return { ...empty, error: `git 실행 실패: ${String(err)}` }
   }
@@ -45,6 +56,9 @@ async function load($: EngineInterface): Promise<Repo> {
 // 갱신이 겹치면 하나로 합친다. 도는 중에 다시 요청되면 끝난 뒤 한 번 더 읽어 마지막 상태를 남긴다.
 let busy = false
 let again = false
+// 마지막 갱신에 걸린 시간과 끝난 시각. 주기 갱신은 걸린 시간의 30배(최소 2초)마다 해서 CPU를 3% 넘게 쓰지 않는다.
+let cost = 0
+let lastEnd = 0
 async function refresh($: EngineInterface) {
   if (busy) {
     again = true
@@ -54,8 +68,11 @@ async function refresh($: EngineInterface) {
   try {
     do {
       again = false
+      const t0 = await $.clock.now()
       const next = await load($)
       if (JSON.stringify(next) !== JSON.stringify(await read($, repo))) await update($, repo, () => next)
+      lastEnd = await $.clock.now()
+      cost = lastEnd - t0
     } while (again)
   } finally {
     busy = false
@@ -111,8 +128,9 @@ export const register: Register = on => {
     await $.command.register({ name: 'git-graph', description: 'git 커밋 그래프 패널 열기' })
     await refresh($)
     if (!(await read($, repo)).error) void open($)
-    // ponytail: 2초마다 git을 다시 읽는다(한 번에 수십 ms). 큰 저장소에서 느려지면 .git 변경 감시로 바꾼다.
+    // ponytail: 2초마다 확인하고, 느린 저장소는 걸린 시간에 맞춰 건너뛴다. 그래도 무거우면 .git 변경 감시로 바꾼다.
     const tick = async () => {
+      if ((await $.clock.now()) - lastEnd < Math.max(2000, cost * 30) - 100) return
       if (await isOpen($)) await refresh($)
     }
     $.clock.every(2000, () => void tick().catch(() => {}))
