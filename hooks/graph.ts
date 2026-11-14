@@ -210,6 +210,11 @@ function cells(r: Laid, width: number, node: string): Seg[] {
   return out.map(({ ch, lane }) => (lane < 0 ? { t: ch } : { t: ch, color: PALETTE[r.colors[lane]!] }))
 }
 
+// 커밋 기호. 레인 선과 이어지도록 선 문자로 그리고, 위(자식)와 아래(부모)로 선이 이어진 쪽만 그린다.
+// HEAD는 지금 위치가 바로 보이도록 ◉로 둔다.
+const NODE = ['━', '┯', '┷', '┿']
+const node = (r: Laid) => (r.isHead ? '◉' : NODE[(r.before[r.col] ? 2 : 0) + (r.after[r.col] ? 1 : 0)]!)
+
 function passing(r: Laid, width: number, ch: string): Seg[] {
   const out: Seg[] = []
   for (let i = 0; i < width; i++) {
@@ -266,7 +271,7 @@ export function buildRows(commits: Commit[], open: ReadonlySet<string>, now: num
       key: `c:${r.c.h}`,
       hash: r.c.h,
       ...(branch ? { branch } : {}),
-      graph: cells(r, width, r.isHead ? '◉' : r.c.p.length === 0 ? '○' : '●'),
+      graph: cells(r, width, node(r)),
       label: [
         ...(ctx.marks.has(`c:${r.c.h}`) ? [MARK] : []),
         ...chips(r.refs, PALETTE[r.colors[r.col]!], ctx.marks),

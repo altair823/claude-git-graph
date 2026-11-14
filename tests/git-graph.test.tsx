@@ -44,12 +44,12 @@ test('커밋은 모두 제목과 함께 보이고, 작업 중 변경은 HEAD 위
   expect(text(rows)).toEqual([
     '◌    작업 중 변경 2개',
     '◉     main 로컬 ↑3 IRC 경로 수정',
-    '●─╮  merge #1 x',
-    '│ ●  e2e 재시도',
-    '● │  문서 정리',
-    '│ ●  e2e 러너',
-    '●─╯  ◇ v1 릴리스',
-    '○    첫 커밋',
+    '┿─╮  merge #1 x',
+    '│ ┿  e2e 재시도',
+    '┿ │  문서 정리',
+    '│ ┿  e2e 러너',
+    '┿─╯  ◇ v1 릴리스',
+    '┷    첫 커밋',
   ])
 })
 
@@ -63,15 +63,15 @@ const TRACK = { main: { up: 'origin/main', ahead: 0, behind: 0 } }
 test('직선 구간이 10개 이상이면 처음 3개만 보이고 나머지는 더 보기로 접는다', () => {
   expect(text(buildRows(parseLog(LONG), new Set(), 1700000000 * 1000, { track: TRACK, marks: new Set() }))).toEqual([
     '◉   main  맨 위',
-    '●  커밋 1',
-    '●  커밋 2',
-    '●  커밋 3',
+    '┿  커밋 1',
+    '┿  커밋 2',
+    '┿  커밋 3',
     '┊  ▸ 커밋 9개 더 보기',
-    '○  첫 커밋',
+    '┷  첫 커밋',
   ])
   // 펼치면 접기 줄 아래로 나머지가 나온다. b로 고른 브랜치와 x로 고른 커밋에는 ✓가 붙는다.
   const open = buildRows(parseLog(LONG), new Set(['r:h4']), 1700000000 * 1000, { track: TRACK, marks: new Set(['b:main', 'c:h2']) })
-  expect(text(open).slice(0, 7)).toEqual(['◉   ✓ main  맨 위', '●  커밋 1', '●  ✓ 커밋 2', '●  커밋 3', '│  ▾ 커밋 9개 접기', '●  커밋 4', '●  커밋 5'])
+  expect(text(open).slice(0, 7)).toEqual(['◉   ✓ main  맨 위', '┿  커밋 1', '┿  ✓ 커밋 2', '┿  커밋 3', '│  ▾ 커밋 9개 접기', '┿  커밋 4', '┿  커밋 5'])
   expect(open.length).toBe(15)
 })
 
@@ -84,7 +84,7 @@ test('원격은 로컬 칩에 앞선 수로 합치고, 병합 안 된 원격 브
   // 같은 원격을 추적하는 다른 로컬 브랜치(old)가 있어도 main 기준으로 판단해야 한다.
   const track = { main: { up: 'origin/main', ahead: 1, behind: 0 }, old: { up: 'origin/main', ahead: 0, behind: 3 } }
   const rows = buildRows(parseLog(log), new Set(), 1700000000 * 1000, { track, marks: new Set(['c:s1']) })
-  expect(text(rows)).toEqual(['◉     main ↑1 IRC 경로 수정', '│ ●  ✓ origin/spike 실험', '●─╯  origin/main 문서 정리', '○    첫 커밋'])
+  expect(text(rows)).toEqual(['◉     main ↑1 IRC 경로 수정', '│ ┯  ✓ origin/spike 실험', '┿─╯  origin/main 문서 정리', '┷    첫 커밋'])
 })
 
 test('같은 원격을 여러 로컬 브랜치가 추적해도, 같은 커밋을 가리키는 로컬이 있으면 원격 이름을 합친다', () => {
@@ -93,7 +93,7 @@ test('같은 원격을 여러 로컬 브랜치가 추적해도, 같은 커밋을
     rec('c', '', 'refs/heads/old', '첫 커밋')
   const track = { main: { up: 'origin/main', ahead: 0, behind: 0 }, old: { up: 'origin/main', ahead: 0, behind: 1 } }
   const rows = buildRows(parseLog(log), new Set(), 1700000000 * 1000, { track, marks: new Set() })
-  expect(text(rows)).toEqual(['◉   main  IRC 경로 수정', '○   old ↓1 첫 커밋'])
+  expect(text(rows)).toEqual(['◉   main  IRC 경로 수정', '┷   old ↓1 첫 커밋'])
 })
 
 test('push한 적 없는 로컬 브랜치는 로컬로 표시하고 어느 원격에도 없는 커밋 수를 붙인다', () => {
@@ -209,7 +209,7 @@ test('패널에 브랜치와 그래프를 그리고, 작업 중 변경 줄에서
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /변경/ }))?.text).toMatch(/^main ↑1  변경 2개 +kkachi$/)
-    expect((await ui.find({ key: 'c:a' }))?.text).toContain('● │  문서 정리')
+    expect((await ui.find({ key: 'c:a' }))?.text).toContain('┿ │  문서 정리')
     expect((await ui.find({ key: 'w:wip' }))?.text).toContain('◌    작업 중 변경 2개')
     await ui.unmount()
   }
