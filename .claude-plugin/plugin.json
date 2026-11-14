@@ -1,6 +1,5 @@
 {
   "name": "git-graph",
-  "version": "0.1.0",
   "description": "오른쪽 패널에 현재 저장소의 git 커밋 그래프를 보여 준다",
   "types": "./types/index.d.ts"
 }
