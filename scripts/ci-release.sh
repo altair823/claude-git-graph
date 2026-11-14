@@ -31,7 +31,7 @@ fi
 # 지난 태그와 main이 갈라진 곳(merge-base)부터 센다.
 base="${last:+$(git merge-base "v$last" HEAD)}"
 notes="$(git log --no-merges --format='- %s' ${base:+"$base"..}HEAD)"
-body="$(printf '%s\n\n## 변경\n\n%s\n\n## 설치\n\n```\nclaude plugin install git-graph@altair-skills\nclaude plugin update git-graph@altair-skills\n```\n' \
+body="$(printf '%s\n\n## 변경\n\n%s\n\n## 설치\n\n```\nclaude plugin marketplace add altair823/claude-git-graph\nclaude plugin install git-graph@claude-git-graph\n```\n\n이미 설치했다면 mod가 새 버전을 스스로 받아 두고, 패널의 u로 바로 적용한다.\n' \
     "git-graph $next 릴리스다. main의 시험을 통과한 커밋을 CI가 릴리스했다." "$notes")"
 
 if [ "${DRY_RUN:-}" = 1 ]; then

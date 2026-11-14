@@ -4,8 +4,8 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Upgrade } from '../types'
 
-// 릴리스 태그를 조회할 저장소. 설치한 컴퓨터는 이미 이 저장소의 git 인증을 갖고 있으므로 비공개여도 조회된다.
-const UPSTREAM = 'https://gitea.altair823.xyz/altair823-org/claude-git-graph.git'
+// 릴리스 태그를 조회할 공개 저장소(GitHub 미러). 개발은 비공개 Gitea에서 하고, 릴리스는 미러로 바로 넘어온다.
+const UPSTREAM = 'https://github.com/altair823/claude-git-graph.git'
 // 인증이 없을 때 입력을 기다리며 멈추지 않게 한다.
 const QUIET = { GIT_TERMINAL_PROMPT: '0' }
 

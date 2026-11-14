@@ -76,24 +76,30 @@ fetch는 하지 않는다. 원격 정보는 마지막 fetch 시점의 상태이�
 
 ## 새 버전
 
-- 세션을 시작할 때와 6시간마다 저장소의 릴리스 태그(`git ls-remote`)를 확인한다. 설치한 컴퓨터는 이미 저장소의 git 인증을 갖고 있으므로 따로 설정할 것이 없다.
+- 세션을 시작할 때와 6시간마다 GitHub 저장소의 릴리스 태그(`git ls-remote`)를 확인한다. 공개 저장소라 인증이 필요 없다.
 - 새 버전이 있으면 바로 `claude plugin update`로 받아 둔다. 다음 세션부터는 새 버전을 쓴다.
 - 지금 세션에는 알림이 뜨고, 패널 둘째 줄 오른쪽에 `u: 0.1.2 적용` 버튼이 생긴다. `u`를 누르면 `/reload-plugins`로 바로 적용한다. 받기에 실패했으면 `u: 0.1.2 업데이트`로 보이고, 누르면 받은 뒤 적용한다.
-- Gitea가 응답하지 않거나 인증이 없으면 조용히 넘기고 다음 확인 때 다시 시도한다.
+- GitHub에 연결되지 않으면 조용히 넘기고 다음 확인 때 다시 시도한다.
 - 설치 캐시에서 실행될 때만 확인한다. 저장소 작업 사본을 연결한 개발용 실행에서는 하지 않는다.
 
 ## 설치
 
-이 저장소가 마켓플레이스를 겸한다. 셸에서 다음 두 줄을 실행한 뒤, 세션에서 `/reload-plugins`를 하거나 새 세션을 연다.
+이 GitHub 저장소가 마켓플레이스를 겸한다. 셸에서 다음 두 줄을 실행한 뒤, 세션에서 `/reload-plugins`를 하거나 새 세션을 연다.
 
 ```
-claude plugin marketplace add https://gitea.altair823.xyz/altair823-org/claude-git-graph.git
+claude plugin marketplace add altair823/claude-git-graph
 claude plugin install git-graph@claude-git-graph
 ```
 
-설치본은 `release` 브랜치(CI가 시험을 통과한 커밋만 릴리스)를 받는다. 새 버전은 mod가 스스로 확인해 받아 둔다(아래 "새 버전" 참고). `altair-skills` 마켓플레이스를 쓰는 컴퓨터는 `git-graph@altair-skills`로도 설치할 수 있다.
+설치본은 `release` 브랜치(CI가 시험을 통과한 커밋만 릴리스)를 받는다. 새 버전은 mod가 스스로 확인해 받아 둔다(위 "새 버전" 참고).
 
 요구 사항은 git 2.31 이상(`--path-format=absolute`, `--diff-merges`를 쓴다)과 mod를 지원하는 Claude Code(2.1.325에서 확인)다.
+
+## 저장소와 기여
+
+- 개발과 CI는 비공개 Gitea 저장소에서 하고, 이 GitHub 저장소는 코드와 릴리스를 공개하는 미러다. 커밋할 때마다 자동으로 동기화된다.
+- 이슈는 GitHub에서 받는다.
+- PR도 받지만 여기서 직접 머지하지 않는다. 미러가 다음 동기화 때 덮어쓰기 때문이다. 변경을 Gitea로 가져와 CI를 거쳐 반영하고, 작성자를 커밋의 공동 작성자로 남긴 뒤 PR을 닫는다. 반영된 커밋은 곧 이 저장소에도 나타난다.
 
 ## 개발
 
@@ -108,10 +114,10 @@ claude plugin test .
 
 1. 모든 push에서 Gitea 공용 러너가 Claude Code 2.1.325로 `claude plugin validate`와 `claude plugin test`를 돌린다.
 2. main에서 시험이 통과하면 `scripts/ci-release.sh`가 다음 버전을 정한다. 마지막 태그의 patch를 1 올리고, main의 `plugin.json` 버전이 마지막 태그보다 높으면(minor, major를 직접 올린 경우) 그 버전을 쓴다.
-3. 버전 커밋을 `release` 브랜치에 올리고 `v<버전>` 태그와 Gitea 릴리스를 만든다. 노트는 지난 릴리스 뒤로 main에 들어온 커밋 제목이다. main에는 CI 커밋이 들어가지 않는다.
+3. 버전 커밋을 `release` 브랜치에 올리고 `v<버전>` 태그와 Gitea 릴리스를 만든다. 노트는 지난 릴리스 뒤로 main에 들어온 커밋 제목이다. main에는 CI 커밋이 들어가지 않는다. Gitea의 push mirror가 브랜치와 태그를 곧바로 GitHub로 넘긴다.
 4. 마지막 릴리스 뒤로 `hooks/`, `types/`가 바뀌지 않았으면 릴리스하지 않는다. 문서만 바뀐 push는 CI도 돌지 않는다.
 
-설치본은 마켓플레이스가 가리키는 `release` 브랜치만 받으므로, 시험을 통과해 릴리스된 코드만 `claude plugin update git-graph@altair-skills`로 들어온다. 다음 버전을 미리 보려면 `DRY_RUN=1 scripts/ci-release.sh`를 실행한다.
+설치본은 마켓플레이스가 가리키는 `release` 브랜치만 받으므로, 시험을 통과해 릴리스된 코드만 들어온다. 다음 버전을 미리 보려면 `DRY_RUN=1 scripts/ci-release.sh`를 실행한다.
 
 ## 라이선스
 
