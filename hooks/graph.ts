@@ -23,7 +23,8 @@ export type Row = {
 }
 
 // 화면에 보일 이름표. 원격 이름은 로컬 브랜치와 합치거나 숨긴 뒤 남은 것만 있다.
-type Ref = { kind: 'local' | 'remote' | 'tag'; name: string; ahead?: number; behind?: number; gone?: true }
+// localOnly: upstream도 같은 이름의 원격 브랜치도 없는 로컬 브랜치. ahead는 그때 어느 원격에도 없는 커밋 수다.
+type Ref = { kind: 'local' | 'remote' | 'tag'; name: string; ahead?: number; behind?: number; gone?: true; localOnly?: true }
 
 export type Ctx = { track: Record<string, Track>; marks: ReadonlySet<string> }
 
@@ -44,9 +45,9 @@ export function parseLog(out: string): Commit[] {
 const isHeadRef = (r: string) => r === 'HEAD' || r.startsWith('HEAD -> ')
 const tagName = (r: string) => r.replace(/^tag: (refs\/tags\/)?/, '')
 
-function ancestors(byHash: Map<string, Commit>, from: string): Set<string> {
+function ancestors(byHash: Map<string, Commit>, from: string | string[]): Set<string> {
   const seen = new Set<string>()
-  const stack = [from]
+  const stack = typeof from === 'string' ? [from] : [...from]
   while (stack.length) {
     const h = stack.pop()!
     const c = byHash.get(h)
@@ -64,15 +65,31 @@ function visibleRefs(commits: Commit[], track: Record<string, Track>): Map<strin
   const head = commits.find(c => c.refs.some(isHeadRef))
   const merged = head ? ancestors(byHash, head.h) : new Set<string>()
   const localAt = new Map<string, string>()
+  const remoteAt = new Map<string, string>()
   for (const c of commits) {
     for (const raw of c.refs) {
       const r = raw.replace(/^HEAD -> /, '')
       if (r.startsWith('refs/heads/')) localAt.set(r.slice(11), c.h)
+      if (r.startsWith('refs/remotes/') && !r.endsWith('/HEAD')) remoteAt.set(r.slice(13), c.h)
     }
   }
-  // 원격 하나를 여러 로컬 브랜치가 추적할 수 있다.
+  // 원격 하나를 여러 로컬 브랜치가 추적할 수 있다. upstream 설정 없이 같은 이름으로 push한 브랜치도 추적하는 것으로 본다.
   const trackers = new Map<string, string[]>()
-  for (const [local, t] of Object.entries(track)) trackers.set(t.up, [...(trackers.get(t.up) ?? []), local])
+  const addTracker = (up: string, local: string) => trackers.set(up, [...(trackers.get(up) ?? []), local])
+  for (const [local, t] of Object.entries(track)) addTracker(t.up, local)
+  const sameName = (local: string) => [...remoteAt.keys()].find(r => r.slice(r.indexOf('/') + 1) === local)
+  for (const local of localAt.keys()) {
+    const up = track[local] ? undefined : sameName(local)
+    if (up) addTracker(up, local)
+  }
+  // 어느 원격에서든 닿는 커밋. 로컬 전용 브랜치의 push 안 된 커밋 수를 셀 때 쓴다(읽은 범위 안에서).
+  let onRemote: Set<string> | undefined
+  const unpushed = (h: string) => {
+    onRemote ??= ancestors(byHash, [...remoteAt.values()])
+    let n = 0
+    for (const x of ancestors(byHash, h)) if (!onRemote.has(x)) n++
+    return n
+  }
   const out = new Map<string, Ref[]>()
   for (const c of commits) {
     const refs: Ref[] = []
@@ -83,7 +100,12 @@ function visibleRefs(commits: Commit[], track: Record<string, Track>): Map<strin
       else if (r.startsWith('refs/heads/')) {
         const name = r.slice(11)
         const t = track[name]
-        refs.push({ kind: 'local', name, ...(t?.ahead ? { ahead: t.ahead } : {}), ...(t?.behind ? { behind: t.behind } : {}), ...(t?.gone ? { gone: true as const } : {}) })
+        if (!t && !sameName(name)) {
+          const n = unpushed(c.h)
+          refs.push({ kind: 'local', name, localOnly: true, ...(n ? { ahead: n } : {}) })
+        } else {
+          refs.push({ kind: 'local', name, ...(t?.ahead ? { ahead: t.ahead } : {}), ...(t?.behind ? { behind: t.behind } : {}), ...(t?.gone ? { gone: true as const } : {}) })
+        }
       } else if (r.startsWith('refs/remotes/')) {
         const name = r.slice(13)
         const locals = trackers.get(name)
@@ -100,8 +122,14 @@ function chips(refs: Ref[], color: string | undefined): Seg[] {
   return refs.flatMap((r): Seg[] => {
     if (r.kind === 'tag') return [{ t: `◇ ${r.name}`, color: 'yellow', bold: true }, { t: ' ' }]
     if (r.kind === 'remote') return [{ t: r.name, color, dim: true }, { t: ' ' }]
-    const sync = `${r.ahead ? `↑${r.ahead}` : ''}${r.behind ? `↓${r.behind}` : ''}${r.gone ? '원격 없음' : ''}`
-    return [{ t: ` ${r.name} `, color, inverse: true, bold: true }, ...(sync ? [{ t: sync, color }] : []), { t: ' ' }]
+    const sync = `${r.ahead ? `↑${r.ahead}` : ''}${r.behind ? `↓${r.behind}` : ''}`
+    return [
+      { t: ` ${r.name} `, color, inverse: true, bold: true },
+      ...(r.localOnly ? [{ t: '로컬', dim: true as const }, ...(sync ? [{ t: ' ' }] : [])] : []),
+      ...(sync ? [{ t: sync, color }] : []),
+      ...(r.gone ? [{ t: '원격 삭제됨', dim: true as const }] : []),
+      { t: ' ' },
+    ]
   })
 }
 
@@ -256,7 +284,8 @@ export function buildRows(commits: Commit[], open: ReadonlySet<string>, now: num
         fold: id,
         branch,
         graph: cells(r, width, r.isHead ? '◉' : '◆'),
-        label: [...mark(ctx.marks.has(`b:${branch}`)), ...chips(r.refs, color(r)), { t: `${isOpen ? '▾' : '▸'} ${run.length + 1}`, underline: true }],
+        // 펼치기 개수를 이름표 앞에 두어 긴 브랜치 이름에 잘리지 않게 한다.
+        label: [...mark(ctx.marks.has(`b:${branch}`)), { t: `${isOpen ? '▾' : '▸'} ${run.length + 1}`, underline: true }, { t: ' ' }, ...chips(r.refs, color(r))],
         age: age(r.c.t, now),
       })
       if (isOpen) for (const x of [r, ...run]) rows.push(full(x))

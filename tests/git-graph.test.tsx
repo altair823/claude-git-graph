@@ -38,9 +38,10 @@ const text = (rows: ReturnType<typeof buildRows>) =>
 
 test('기본 화면은 이름이 붙은 커밋, 병합, 분기점만 남기고 나머지를 접는다', () => {
   // origin/feat/e2e는 추적하는 로컬 브랜치가 없고 이미 병합됐으므로 숨겨져 접힌 구간에 들어간다.
+  // main은 upstream도 원격 브랜치도 없어 로컬 전용이고, 원격에 없는 커밋은 top, m, a 3개다.
   const rows = buildRows(parseLog(LOG), new Set(), 1700000000 * 1000)
   expect(text(rows)).toEqual([
-    '◉     main',
+    '◉     main 로컬 ↑3',
     '●─╮  merge feat/e2e',
     '┊ ┊  ▸ 커밋 3개',
     '●─╯  ◇ v1',
@@ -72,6 +73,22 @@ test('같은 원격을 여러 로컬 브랜치가 추적해도, 같은 커밋을
   const track = { main: { up: 'origin/main', ahead: 0, behind: 0 }, old: { up: 'origin/main', ahead: 0, behind: 1 } }
   const rows = buildRows(parseLog(log), new Set(), 1700000000 * 1000, { track, marks: new Set() })
   expect(text(rows)).toEqual(['◉   main', '○   old ↓1'])
+})
+
+test('push한 적 없는 로컬 브랜치는 로컬로 표시하고 어느 원격에도 없는 커밋 수를 붙인다', () => {
+  const log =
+    rec('w2', 'w1', 'refs/heads/wip', 'WIP 2') +
+    rec('top', 'c', 'HEAD -> refs/heads/main, refs/remotes/origin/main', '맨 위') +
+    rec('w1', 'c', '', 'WIP 1') +
+    rec('p1', 'c', 'refs/heads/pushed, refs/remotes/origin/pushed', 'upstream 없이 push함') +
+    rec('c', '', 'refs/heads/gone-one', '첫 커밋')
+  const track = { main: { up: 'origin/main', ahead: 0, behind: 0 }, 'gone-one': { up: 'origin/gone-one', ahead: 0, behind: 0, gone: true as const } }
+  const rows = buildRows(parseLog(log), new Set(), 1700000000 * 1000, { track, marks: new Set() })
+  const label = (h: string) => rows.find(r => r.key.endsWith(`:${h}`))!.label.map(s => s.t).join('')
+  expect(label('w2')).toContain(' wip 로컬 ↑2')
+  expect(label('p1')).toBe(' pushed  ')
+  expect(label('top')).toBe(' main  ')
+  expect(label('c')).toBe(' gone-one 원격 삭제됨 ')
 })
 
 test('태그 계열마다 마지막 릴리스 뒤로 쌓인 커밋 수를 센다', () => {
