@@ -165,18 +165,33 @@ async function send($: EngineInterface, say?: Say) {
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 const pressable = (r?: Row) => !!(r?.hash || r?.fold)
 
-// 커서 위아래로 누를 수 있는 줄이 하나씩 보이도록 창을 옮긴다. 그래야 방향키가 창 밖으로 이어서 움직인다.
+// 커서 위아래로 누를 수 있는 줄이 몇 개씩(최대 4개) 보이도록 창을 옮긴다. 방향키는 화면에 그려진 버튼 사이만
+// 움직이므로, 여유가 있어야 키를 계속 누르고 있어도 다시 그리기가 따라와 창 밖으로 이어서 움직인다.
 export function keepInView(rows: Row[], i: number, start: number, height: number): number {
-  let lo = i - 1
-  while (lo > 0 && !pressable(rows[lo])) lo--
-  let hi = i + 1
-  while (hi < rows.length - 1 && !pressable(rows[hi])) hi++
-  lo = clamp(lo, 0, i)
-  hi = clamp(hi, i, rows.length - 1)
+  const margin = Math.max(1, Math.min(4, Math.floor(height / 4)))
+  const reach = (dir: 1 | -1) => {
+    let k = i
+    for (let n = 0; n < margin; n++) {
+      let j = k + dir
+      while (j >= 0 && j < rows.length && !pressable(rows[j])) j += dir
+      if (j < 0 || j >= rows.length) break
+      k = j
+    }
+    return k
+  }
   let s = start
-  if (lo < s) s = lo
+  const hi = reach(1)
   if (hi > s + height - 1) s = hi - height + 1
+  const lo = reach(-1)
+  if (lo < s) s = lo
+  if (i > s + height - 1) s = i - height + 1
   return clamp(s, 0, Math.max(0, rows.length - height))
+}
+
+// 클릭으로도 패널에 키보드가 들어오게 한다. 입력창이 비어 있을 때만 받아들여지는 요청이다.
+async function focusPane($: EngineInterface, key?: string) {
+  await open($, true)
+  if (key) await $.ui.focus({ requestId: PANE, key }).catch(() => {})
 }
 
 // focus는 요청이다. 입력창이 비어 있을 때만 받아들여지므로 /git-graph를 보낸 직후에는 패널로 키보드가 옮겨진다.
@@ -216,6 +231,8 @@ export const register: Register = on => {
 
   // 방향키나 클릭으로 커서가 움직이면 기록하고, 창 밖으로 나가지 않게 한다.
   on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    // 방향키와 Tab이 아래 단축키 버튼으로 넘어가지 않게 한다. 단축키는 글자 키나 클릭으로 누른다.
+    if (e.element?.startsWith('act:') && e.origin.kind === 'person') return {}
     const done = await next(e)
     const key = e.element
     if (!key) return done
@@ -272,14 +289,16 @@ export const register: Register = on => {
     const rows = await rowsOf($, now)
     const start = clamp(v.start, 0, Math.max(0, rows.length - lastRows))
     const shown = trimGraphs(rows.slice(start, start + lastRows))
-    const press = (row: Row) =>
-      row.fold
+    const press = (row: Row) => {
+      void focusPane($, row.key)
+      return row.fold
         ? update($, view, x => ({
             ...x,
             cur: row.key,
             open: x.open.includes(row.fold!) ? x.open.filter(f => f !== row.fold) : [...x.open, row.fold!],
           }))
         : select($, row.hash!)
+    }
 
     const foot: Seg[][] = []
     if (hasDetail) {
@@ -300,7 +319,7 @@ export const register: Register = on => {
     }
     // 단축키는 패널이 키보드를 가지고 있을 때 동작한다. 고른 것이 없으면 커서가 있는 줄을 쓴다.
     const act = (hotkey: string, label: string, onPress: () => unknown) => (
-      <Button key={`act:${hotkey}`} plain hotkey={hotkey} onPress={() => void onPress()}>{label}</Button>
+      <Button key={`act:${hotkey}`} plain hotkey={hotkey} onPress={() => void focusPane($).catch(() => {}).then(() => onPress())}>{label}</Button>
     )
     const gap = <Text>  </Text>
     // 패널에 들어오면 커서는 마지막 위치에서, 처음이면 첫 줄에서 시작한다.

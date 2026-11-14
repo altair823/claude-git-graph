@@ -104,11 +104,14 @@ test('한글은 2칸으로 세어 자르고 오른쪽 끝에 시각을 붙인다
   expect(line.map(s => s.t).join('')).toBe('가나다… 2d')
 })
 
-test('커서 아래위로 누를 수 있는 줄이 하나씩 보이도록 창을 옮긴다', () => {
+test('커서 아래위로 누를 수 있는 줄이 여유 있게 보이도록 창을 옮긴다', () => {
+  // 높이 10이면 위아래로 2줄씩 여유를 둔다. 연결선처럼 누를 수 없는 줄은 여유로 세지 않는다.
   const rows = Array.from({ length: 30 }, (_, i) => ({ key: `c:${i}`, hash: String(i), graph: [], label: [], age: '' }))
-  expect(keepInView(rows, 9, 0, 10)).toBe(1)
-  expect(keepInView(rows, 3, 5, 10)).toBe(2)
+  expect(keepInView(rows, 9, 0, 10)).toBe(2)
+  expect(keepInView(rows, 3, 5, 10)).toBe(1)
   expect(keepInView(rows, 29, 0, 10)).toBe(20)
+  const gaps = rows.map((r, i) => (i % 2 ? { key: `x:${i}`, graph: [], label: [], age: '' } : r))
+  expect(keepInView(gaps, 8, 0, 10)).toBe(3)
 })
 
 test('패널에 브랜치와 그래프를 그리고, 접힌 구간을 누르면 펼친다', async ($, on) => {
@@ -218,4 +221,36 @@ test('맨 아래 안내는 포커스 상태를 따르고, /git-graph는 패널�
   const inside = await $.ui.mount({ ...PANE, props: { ...PANE.props, isFocused: true }, surface: 'terminal' })
   expect(await inside.find({ type: 'Text', text: /Esc 입력창으로/ })).toBeDefined()
   await inside.unmount()
+})
+
+test('커서가 창 아래쪽으로 가면 그래프가 따라 스크롤된다', async ($, on) => {
+  // 태그가 붙은 커밋 40개: 접히지 않고 모두 한 줄씩 보인다.
+  const many = Array.from({ length: 40 }, (_, i) => rec(`h${i}`, i < 39 ? `h${i + 1}` : '', `tag: refs/tags/t${i}${i ? '' : ', HEAD -> refs/heads/main'}`, `커밋 ${i}`)).join('')
+  on('command.register', () => ({ value: { command: 'git-graph' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.focus', () => ({}))
+  on('clock.every', () => ({ deny: '시험에서는 타이머를 쓰지 않는다' }))
+  on('clock.now', () => ({ value: 1700000000 * 1000 }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_, e) => ({
+    value: { exitCode: 0, stdout: e.argv.includes('log') ? many : '## main\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'c:h0' })).toBeDefined()
+  expect(await ui.find({ key: 'c:h20' })).toBeUndefined()
+  await ui.unmount()
+
+  const move = (element: string) => $.ui.focus({ component: 'Pane', requestId: 'git-graph', element, origin: { kind: 'person' } })
+  await move('c:h20')
+  // 방향키로 단축키 버튼에 가려는 이동은 막고, 커서는 그대로 둔다.
+  expect(await move('act:x')).toEqual({})
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // 그래프 영역은 15줄(24 - 위 2 - 아래 3 - 상세 4), 여유는 3줄이라 9~23번째 줄이 보인다.
+  expect(await ui.find({ key: 'c:h20' })).toBeDefined()
+  expect(await ui.find({ key: 'c:h23' })).toBeDefined()
+  expect(await ui.find({ key: 'c:h24' })).toBeUndefined()
+  expect(await ui.find({ key: 'c:h8' })).toBeUndefined()
+  await ui.unmount()
 })
