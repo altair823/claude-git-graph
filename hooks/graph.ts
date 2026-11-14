@@ -26,7 +26,7 @@ export type Row = {
 
 // 화면에 보일 이름표. 원격 이름은 로컬 브랜치와 합치거나 숨긴 뒤 남은 것만 있다.
 // localOnly: upstream도 같은 이름의 원격 브랜치도 없는 로컬 브랜치. ahead는 그때 어느 원격에도 없는 커밋 수다.
-type Ref = { kind: 'local' | 'remote' | 'tag'; name: string; ahead?: number; behind?: number; gone?: true; localOnly?: true }
+type Ref = { kind: 'local' | 'remote' | 'tag'; name: string; ahead?: number; behind?: number; gone?: true; localOnly?: true; merged?: true }
 
 // wip: 커밋하지 않은 변경 파일 수. 0보다 크면 HEAD 위에 작업 중 변경 줄을 둔다.
 export type Ctx = { track: Record<string, Track>; marks: ReadonlySet<string>; wip?: number }
@@ -85,6 +85,12 @@ function visibleRefs(commits: Commit[], track: Record<string, Track>): Map<strin
     const up = track[local] ? undefined : sameName(local)
     if (up) addTracker(up, local)
   }
+  // 기본 브랜치에 이미 들어 있는 로컬 브랜치(fast-forward로 병합했거나 갈라진 적 없는 것)는 병합됨으로 표시한다.
+  // 기본 브랜치 끝과 같은 커밋을 가리키는 브랜치는 갓 만든 것일 수 있어 제외한다.
+  // ponytail: 기본 브랜치는 main, master만 본다. 다른 이름을 쓰는 저장소가 생기면 origin/HEAD를 읽는다.
+  const base = localAt.has('main') ? 'main' : localAt.has('master') ? 'master' : undefined
+  const baseTip = base ? localAt.get(base)! : undefined
+  const inBase = baseTip ? ancestors(byHash, baseTip) : new Set<string>()
   // 어느 원격에서든 닿는 커밋. 로컬 전용 브랜치의 push 안 된 커밋 수를 셀 때 쓴다(읽은 범위 안에서).
   let onRemote: Set<string> | undefined
   const unpushed = (h: string) => {
@@ -103,7 +109,9 @@ function visibleRefs(commits: Commit[], track: Record<string, Track>): Map<strin
       else if (r.startsWith('refs/heads/')) {
         const name = r.slice(11)
         const t = track[name]
-        if (!t && !sameName(name)) {
+        if (name !== base && c.h !== baseTip && inBase.has(c.h)) {
+          refs.push({ kind: 'local', name, merged: true, ...(t?.ahead ? { ahead: t.ahead } : {}), ...(t?.behind ? { behind: t.behind } : {}) })
+        } else if (!t && !sameName(name)) {
           const n = unpushed(c.h)
           refs.push({ kind: 'local', name, localOnly: true, ...(n ? { ahead: n } : {}) })
         } else {
@@ -128,6 +136,8 @@ function chips(refs: Ref[], color: string | undefined, marks: ReadonlySet<string
     if (r.kind === 'tag') return [{ t: `◇ ${r.name}`, color: 'yellow', bold: true }, { t: ' ' }]
     if (r.kind === 'remote') return [{ t: name, color, dim: true }, { t: ' ' }]
     const sync = `${r.ahead ? `↑${r.ahead}` : ''}${r.behind ? `↓${r.behind}` : ''}`
+    // 병합된 브랜치는 레인 색과 반전을 쓰지 않아 같은 레인의 main과 구분된다.
+    if (r.merged) return [{ t: `${name} 병합됨${sync ? ` ${sync}` : ''}`, dim: true }, { t: ' ' }]
     return [
       { t: ` ${name} `, color, inverse: true, bold: true },
       ...(r.localOnly ? [{ t: '로컬', dim: true as const }, ...(sync ? [{ t: ' ' }] : [])] : []),

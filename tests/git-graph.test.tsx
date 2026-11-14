@@ -93,7 +93,22 @@ test('같은 원격을 여러 로컬 브랜치가 추적해도, 같은 커밋을
     rec('c', '', 'refs/heads/old', '첫 커밋')
   const track = { main: { up: 'origin/main', ahead: 0, behind: 0 }, old: { up: 'origin/main', ahead: 0, behind: 1 } }
   const rows = buildRows(parseLog(log), new Set(), 1700000000 * 1000, { track, marks: new Set() })
-  expect(text(rows)).toEqual(['╤  HEAD  main  IRC 경로 수정', '┷   old ↓1 첫 커밋'])
+  expect(text(rows)).toEqual(['╤  HEAD  main  IRC 경로 수정', '┷  old 병합됨 ↓1 첫 커밋'])
+})
+
+test('main에 이미 들어 있는 로컬 브랜치는 레인 색 없이 흐리게 그리고 병합됨을 붙인다', () => {
+  // done은 fast-forward로 병합된 브랜치, fresh는 main 끝에서 갓 만든 브랜치다.
+  const log =
+    rec('top', 'm', 'HEAD -> refs/heads/main, refs/heads/fresh', '맨 위') +
+    rec('m', 'c', 'refs/heads/done, refs/remotes/origin/done', '병합한 작업') +
+    rec('c', '', '', '첫 커밋')
+  const track = { done: { up: 'origin/done', ahead: 0, behind: 0 } }
+  const rows = buildRows(parseLog(log), new Set(), 1700000000 * 1000, { track, marks: new Set() })
+  const label = (h: string) => rows.find(r => r.key === `c:${h}`)!.label
+  expect(label('m').map(s => s.t).join('')).toBe('done 병합됨 병합한 작업')
+  expect(label('m')[0]).toEqual({ t: 'done 병합됨', dim: true })
+  expect(label('top').map(s => s.t).join('')).not.toContain('병합됨')
+  expect(rows.find(r => r.key === 'c:m')!.branch).toBe('done')
 })
 
 test('push한 적 없는 로컬 브랜치는 로컬로 표시하고 어느 원격에도 없는 커밋 수를 붙인다', () => {
@@ -109,7 +124,7 @@ test('push한 적 없는 로컬 브랜치는 로컬로 표시하고 어느 원�
   expect(label('w2')).toBe(' wip 로컬 ↑2 WIP 2')
   expect(label('p1')).toBe(' pushed  upstream 없이 push함')
   expect(label('top')).toBe('HEAD  main  맨 위')
-  expect(label('c')).toBe(' gone-one 원격 삭제됨 첫 커밋')
+  expect(label('c')).toBe('gone-one 병합됨 첫 커밋')
 })
 
 test('태그 계열마다 마지막 릴리스 뒤로 쌓인 커밋 수를 센다', () => {
