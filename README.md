@@ -78,9 +78,13 @@ fetch는 하지 않는다. 원격 정보는 마지막 fetch 시점의 상태이�
 claude plugin install git-graph@altair-skills
 ```
 
+요구 사항은 git 2.31 이상(`--path-format=absolute`, `--diff-merges`를 쓴다)과 mod를 지원하는 Claude Code(2.1.325에서 확인)다.
+
 ## 개발
 
 ```
 claude plugin validate .
 claude plugin test .
 ```
+
+버전은 `.claude-plugin/plugin.json`의 `version`이다. 이 값을 올려야 `claude plugin update git-graph@altair-skills`가 새 코드를 받는다. 릴리스는 버전을 올린 커밋에 `v<버전>` 태그를 붙이고 Gitea 릴리스로 만든다.
