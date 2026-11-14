@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Detail, Repo, Track, View } from '../types'
 import { ageLong, buildRows, fit, liveMarks, merge, parseLog, releases, statusBranch, tail, trimGraphs, width } from './graph'
 import type { Row, Seg } from './graph'
+import { applyUpgrade, checkUpgrade, readVersion, upgradeLabel } from './upgrade'
 
 const PANE = 'git-graph'
 const DETAIL_ROWS = 6
@@ -75,6 +76,7 @@ async function load($: EngineInterface, prev: Repo): Promise<Repo> {
 
 // 세션 시작이 다시 일어나도(플러그인을 다시 켜거나 작업 프로세스가 다시 뜰 때) 주기 갱신 타이머가 겹치지 않게 한다.
 let ticker: { cancel: () => void } | undefined
+let upgradeTicker: { cancel: () => void } | undefined
 
 // 갱신이 겹치면 하나로 합친다. 도는 중에 다시 요청되면 끝난 뒤 한 번 더 읽어 마지막 상태를 남긴다.
 let busy = false
@@ -281,6 +283,11 @@ export const register: Register = on => {
     }
     ticker?.cancel()
     ticker = $.clock.every(2000, () => void tick().catch(() => {}))
+    // 새 버전은 세션을 시작할 때와 6시간마다 확인한다. 세션 시작을 기다리게 하지 않도록 끝을 기다리지 않는다.
+    await readVersion($)
+    void checkUpgrade($).catch(() => {})
+    upgradeTicker?.cancel()
+    upgradeTicker = $.clock.every(6 * 3600_000, () => void checkUpgrade($).catch(() => {}))
     return started
   })
 
@@ -341,7 +348,7 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const [r, v, dState, now] = await Promise.all([read($, repo), read($, view), read($, detail), $.clock.now()])
+    const [r, v, dState, upLabel, now] = await Promise.all([read($, repo), read($, view), read($, detail), upgradeLabel($), $.clock.now()])
     // 마지막 칸에 글자를 쓰면 줄이 넘어갈 수 있어 한 칸 남긴다.
     const cols = Math.max(20, e.props.bodyColumns - 1)
     const total = Math.max(4, e.props.scroll.bodyRows)
@@ -365,10 +372,11 @@ export const register: Register = on => {
     )
     if (relMemo?.rev !== r.rev) relMemo = { rev: r.rev, rel: releases(r.commits) }
     const rel = relMemo.rel
+    // 새 버전이 있으면 둘째 줄 오른쪽에 fetch 시각 대신 u 버튼을 둔다.
     const header2 = fit(
       rel.flatMap((x, i): Seg[] => [...(i ? [{ t: '  ' }] : []), { t: `◇ ${x.tag}`, color: 'yellow' }, { t: ` +${x.ahead}`, dim: true }]),
-      [{ t: r.fetched ? `fetch ${ageLong(r.fetched / 1000, now)}` : 'fetch 기록 없음', dim: true }],
-      cols,
+      upLabel ? [] : [{ t: r.fetched ? `fetch ${ageLong(r.fetched / 1000, now)}` : 'fetch 기록 없음', dim: true }],
+      upLabel ? Math.max(1, cols - width(`u: ${upLabel}`) - 1) : cols,
     )
     if (r.error) {
       return (
@@ -470,7 +478,17 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Text>{segs(header)}</Text>
-        <Text>{segs(header2)}</Text>
+        {upLabel ? (
+          <Box flexDirection="row">
+            <Text>{segs(header2)}</Text>
+            <Text> </Text>
+            <Button key="act:u" plain hotkey="u" onPress={() => void applyUpgrade($).catch(() => {})}>
+              <Text color="cyan">{upLabel}</Text>
+            </Button>
+          </Box>
+        ) : (
+          <Text>{segs(header2)}</Text>
+        )}
         {edge('edge:top', start ? `▲ 위로 ${start}줄` : '', -1)}
         {shown.map(row => {
           const line = fit([...row.graph, { t: '  ' }, ...row.label], row.age ? [{ t: row.age, dim: true }] : [], cols)

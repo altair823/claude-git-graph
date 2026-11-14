@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { age, ageLong, buildRows, fit, liveMarks, parseLog, releases, statusBranch, trimGraphs, width } from '../hooks/graph'
 import { promptList, scrolled, stepped, windowStart } from '../hooks/register'
+import { installedId, latestTag, newer } from '../hooks/upgrade'
 
 // 시험 환경에는 있지만 타입 정의(lib)에는 없는 전역 함수
 declare const setTimeout: (fn: (value?: unknown) => void, ms: number) => unknown
@@ -149,6 +150,16 @@ test('지난 시간은 가장 큰 단위로 짧게, 상세에서는 한국어로
   const now = 1700000000 * 1000
   expect([age(1700000000 - 30, now), age(1700000000 - 7200, now), age(1700000000 - 86400 * 9, now)]).toEqual(['0m', '2h', '1w'])
   expect([ageLong(1700000000 - 30, now), ageLong(1700000000 - 300, now), ageLong(1700000000 - 86400 * 400, now)]).toEqual(['방금', '5분 전', '1년 전'])
+})
+
+test('설치 캐시 경로와 원격 태그로 새 버전이 있는지 판단한다', () => {
+  expect(installedId('/home/me/.claude/plugins/cache/altair-skills/git-graph/0.1.1')).toBe('git-graph@altair-skills')
+  // 저장소 작업 사본을 연결한 개발용 실행은 확인하지 않는다.
+  expect(installedId('/home/me/projects/claude-git-graph')).toBeUndefined()
+  expect([newer('0.1.10', '0.1.9'), newer('0.2.0', '0.1.9'), newer('0.1.1', '0.1.1'), newer('0.1.0', '0.1.1')]).toEqual([true, true, false, false])
+  const out = 'aaa\trefs/tags/v0.1.0\nbbb\trefs/tags/v0.1.10\nccc\trefs/tags/v0.1.9\nddd\trefs/tags/app-v9.0.0\n'
+  expect(latestTag(out)).toBe('0.1.10')
+  expect(latestTag('')).toBeUndefined()
 })
 
 test('커서가 창 안에서 움직이면 창은 그대로고, 끝에서 더 나가면 한 줄씩 옮긴다', () => {

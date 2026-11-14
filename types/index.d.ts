@@ -39,8 +39,11 @@ export type Detail = {
   error?: true
 }
 
+// latest: 확인한 최신 릴리스 버전, ready: 그 버전을 이미 받아 두었는지(받았으면 u는 다시 불러오기만 한다)
+export type Upgrade = { latest: string; ready: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
-    'git-graph': { repo: Shaped<Repo>; view: Shaped<View>; detail: Shaped<Detail> }
+    'git-graph': { repo: Shaped<Repo>; view: Shaped<View>; detail: Shaped<Detail>; upgrade: Shaped<Upgrade> }
   }
 }
