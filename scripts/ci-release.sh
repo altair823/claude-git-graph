@@ -52,8 +52,9 @@ git commit -q --allow-empty -m "$next 릴리스 [skip ci]"
 git tag -a "v$next" -m "$next"
 
 # release 브랜치는 매번 main 위의 새 릴리스 커밋을 가리키므로 강제로 옮긴다. 지난 릴리스는 태그로 남는다.
-git push -q --force origin HEAD:refs/heads/release
-git push -q origin "v$next"
+# 브랜치와 태그를 한 번에 올린다. Gitea의 push mirror는 브랜치 push에만 반응해 동기화하므로, 태그를 따로 올리면
+# GitHub 미러에 태그가 주기 동기화(최대 8시간) 때까지 빠진다. 새 버전 확인은 태그로 한다.
+git push -q --force origin HEAD:refs/heads/release "refs/tags/v$next"
 
 curl -sS --fail-with-body -X POST \
     -H @<(printf 'Authorization: token %s\n' "$GITEA_TOKEN") -H 'Content-Type: application/json' \
