@@ -8,6 +8,8 @@ export type Repo = {
   rev: number
   branch: string
   changes: number
+  // git status --porcelain 줄(상태 두 글자, 공백, 경로). 작업 중 변경 줄의 상세에 쓴다. 처음 50개까지
+  files: string[]
   name: string
   commits: Commit[]
   more: boolean
@@ -23,8 +25,19 @@ export type Repo = {
 // marks: x로 고른 것(c:<해시> 또는 b:<브랜치>)
 export type View = { open: string[]; cur: string; off: number; start: number; marks: string[] }
 
+// files, add, del: 바뀐 파일 수와 추가, 삭제 줄 수 합계. paths: 많이 바뀐 파일부터 5개까지(p 경로, a 추가, d 삭제)
 // error: git show가 실패한 커밋(기억하지 않고, 다시 가면 다시 읽는다)
-export type Detail = { h: string; author: string; t: number; s: string; files: number; add: number; del: number; error?: true }
+export type Detail = {
+  h: string
+  author: string
+  t: number
+  s: string
+  files: number
+  add: number
+  del: number
+  paths: { p: string; a: number; d: number }[]
+  error?: true
+}
 
 declare module 'claude-code' {
   interface PluginState {

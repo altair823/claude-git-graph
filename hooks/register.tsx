@@ -2,17 +2,18 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Detail, Repo, Track, View } from '../types'
-import { ageLong, buildRows, fit, liveMarks, merge, parseLog, releases, statusBranch, trimGraphs, width } from './graph'
+import { ageLong, buildRows, fit, liveMarks, merge, parseLog, releases, statusBranch, tail, trimGraphs, width } from './graph'
 import type { Row, Seg } from './graph'
 
 const PANE = 'git-graph'
+const DETAIL_ROWS = 6
 const LIMIT = 500
 // 저장 형태가 바뀌면 shape 값을 올린다. 이전 버전이 저장한 값은 버려진다.
-const EMPTY: Repo = { rev: 0, branch: '', changes: 0, name: '', commits: [], more: false, track: {}, fetched: 0 }
-const repo = atom({ plugin: 'git-graph', key: 'repo' } as const, EMPTY, { shape: 'repo-3' })
+const EMPTY: Repo = { rev: 0, branch: '', changes: 0, files: [], name: '', commits: [], more: false, track: {}, fetched: 0 }
+const repo = atom({ plugin: 'git-graph', key: 'repo' } as const, EMPTY, { shape: 'repo-4' })
 const view = atom({ plugin: 'git-graph', key: 'view' } as const, { open: [], cur: '', off: 0, start: 0, marks: [] } as View, { shape: 'view-4' })
-const NO_DETAIL: Detail = { h: '', author: '', t: 0, s: '', files: 0, add: 0, del: 0 }
-const detail = atom({ plugin: 'git-graph', key: 'detail' } as const, NO_DETAIL, { shape: 'detail-2' })
+const NO_DETAIL: Detail = { h: '', author: '', t: 0, s: '', files: 0, add: 0, del: 0, paths: [] }
+const detail = atom({ plugin: 'git-graph', key: 'detail' } as const, NO_DETAIL, { shape: 'detail-3' })
 
 const LOG = [
   'git', 'log', '--topo-order', '--decorate=full', '--no-show-signature',
@@ -56,7 +57,7 @@ async function load($: EngineInterface, prev: Repo): Promise<Repo> {
     const [toplevel = '', fetchHead = ''] = top.stdout.split('\n')
     const name = toplevel.trim().split('/').pop() ?? ''
     const fetched = await $.fs.stat(fetchHead.trim()).then(st => st.mtimeMs, () => 0)
-    const base = { branch, name, changes: changes.length, fetched }
+    const base = { branch, name, changes: changes.length, files: changes.slice(0, 50), fetched }
     // 두 명령이 모두 성공했을 때만 이전 이력을 재사용한다. 실패하면 ref 상태를 알 수 없으므로 다시 읽는다.
     const cacheable = top.exitCode === 0 && refs.exitCode === 0
     const key = top.stdout + refs.stdout
@@ -119,15 +120,23 @@ async function showDetail($: EngineInterface, h: string) {
 async function loadDetail($: EngineInterface, h: string) {
   if ((await read($, view)).cur !== `c:${h}`) return
   const out = await $.process
-    .run(['git', 'show', '--no-show-signature', '--diff-merges=first-parent', '--shortstat', '--format=%an%x1f%ct%x1f%s', h])
+    .run(['git', 'show', '--no-show-signature', '--diff-merges=first-parent', '--numstat', '--format=%an%x1f%ct%x1f%s', h])
     .catch(() => undefined)
   // 실패(그사이 사라진 커밋 등)는 표시만 하고 기억하지 않는다. 다음에 다시 가면 다시 읽는다.
   if (!out || out.exitCode !== 0) return void (await update($, detail, () => ({ ...NO_DETAIL, h, error: true as const })))
-  const [author = '', t = '0', s = ''] = (out.stdout.split('\n')[0] ?? '').split('\x1f')
-  const num = (re: RegExp) => Number(re.exec(out.stdout)?.[1] ?? 0)
+  const [first = '', ...rest] = out.stdout.split('\n')
+  const [author = '', t = '0', s = ''] = first.split('\x1f')
+  // --numstat 줄은 '추가<탭>삭제<탭>경로'다. 바이너리 파일은 수 대신 '-'다.
+  const paths = rest.flatMap(line => {
+    const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line)
+    return m ? [{ p: m[3]!, a: Number(m[1]) || 0, d: Number(m[2]) || 0 }] : []
+  })
   const d: Detail = {
     h, author, t: Number(t), s,
-    files: num(/(\d+) files? changed/), add: num(/(\d+) insertions?/), del: num(/(\d+) deletions?/),
+    files: paths.length,
+    add: paths.reduce((n, x) => n + x.a, 0),
+    del: paths.reduce((n, x) => n + x.d, 0),
+    paths: [...paths].sort((x, y) => y.a + y.d - (x.a + x.d)).slice(0, 5),
   }
   // ponytail: 1,000개를 넘으면 통째로 비운다. 커밋 하나당 100바이트 남짓이라 그 전까지는 그대로 둔다.
   if (details.size >= 1000) details.clear()
@@ -140,31 +149,34 @@ let rowsMemo: { key: string; rows: Row[] } | undefined
 let relMemo: { rev: number; rel: ReturnType<typeof releases> } | undefined
 async function rowsOf($: EngineInterface, given?: { v?: View; r?: Repo; now?: number }): Promise<Row[]> {
   const [v, r, t] = await Promise.all([given?.v ?? read($, view), given?.r ?? read($, repo), given?.now ?? $.clock.now()])
-  const key = `${r.rev}|${v.open.join(',')}|${v.marks.join(',')}|${Math.floor(t / 60000)}`
+  const key = `${r.rev}|${r.changes}|${v.open.join(',')}|${v.marks.join(',')}|${Math.floor(t / 60000)}`
   if (rowsMemo?.key === key) return rowsMemo.rows
-  const rows = buildRows(r.commits, new Set(v.open), t, { track: r.track, marks: new Set(v.marks) })
+  const rows = buildRows(r.commits, new Set(v.open), t, { track: r.track, marks: new Set(v.marks), wip: r.changes })
   if (r.more) rows.push({ key: 'more', graph: [], label: [{ t: `최근 커밋 ${LIMIT}개까지만 보여 줍니다`, dim: true }], age: '' })
   rowsMemo = { key, rows }
   return rows
 }
 
-// 커서가 있는 줄을 고를 대상으로 바꾼다: 커밋 줄은 커밋, 브랜치 끝을 접은 줄은 브랜치.
-const targetOf = (row?: Row) => (row?.hash ? `c:${row.hash}` : row?.branch ? `b:${row.branch}` : '')
+// 커서가 있는 줄을 고를 대상으로 바꾼다. x는 커밋, b는 그 줄에 붙은 브랜치다.
+const targetOf = (row: Row | undefined, kind: 'c' | 'b') =>
+  kind === 'c' ? (row?.hash ? `c:${row.hash}` : '') : row?.branch ? `b:${row.branch}` : ''
 
-async function toggleMark($: EngineInterface) {
+async function toggleMark($: EngineInterface, kind: 'c' | 'b') {
   const [v, rows] = await Promise.all([read($, view), rowsOf($)])
-  const id = targetOf(rows.find(r => r.key === v.cur))
-  if (!id) return
+  const id = targetOf(rows.find(r => r.key === v.cur), kind)
+  if (!id) return $.ui.toast(kind === 'b' ? '이 줄에는 브랜치가 없습니다' : '커밋 줄에서 고를 수 있습니다')
   await update($, view, x => ({ ...x, marks: x.marks.includes(id) ? x.marks.filter(m => m !== id) : [...x.marks, id] }))
 }
 
 type Say = (list: string, branch: string) => string
-const ACTIONS: { hotkey: string; label: string; say: Say }[] = [
+// branches: 고른 것 중 브랜치만 넣는다(없으면 커서 줄의 브랜치)
+const ACTIONS: { hotkey: string; label: string; say: Say; branches?: true }[] = [
   { hotkey: '1', label: '체리픽', say: (list, b) => `다음을 ${b} 브랜치에 체리픽해 줘: ${list}` },
   { hotkey: '2', label: '리베이스', say: (list, b) => `${b} 브랜치를 다음 위로 리베이스해 줘: ${list}` },
   { hotkey: '3', label: '병합', say: (list, b) => `다음을 ${b} 브랜치에 병합해 줘: ${list}` },
   { hotkey: '4', label: '되돌리기', say: list => `다음 커밋을 revert해 줘: ${list}` },
   { hotkey: '5', label: '리뷰', say: list => `다음 변경을 리뷰해 줘: ${list}` },
+  { hotkey: '6', label: '브랜치 삭제', say: list => `다음 브랜치를 지워 줘: ${list}`, branches: true },
 ]
 
 // 고른 것(없으면 커서가 있는 줄)을 입력창에 넣는다. 보내기는 사람이 한다.
@@ -180,11 +192,12 @@ export function promptList(marks: readonly string[], commits: Repo['commits']): 
   return [...branches, ...picked].join(', ')
 }
 
-async function send($: EngineInterface, say?: Say) {
+async function send($: EngineInterface, say?: Say, branches?: true) {
   const [r, v, rows] = await Promise.all([read($, repo), read($, view), rowsOf($)])
-  const live = liveMarks(v.marks, r.commits)
-  const marks = live.length ? live : [targetOf(rows.find(x => x.key === v.cur))].filter(Boolean)
-  if (!marks.length) return $.ui.toast('고른 것이 없습니다. x로 고르거나 커서를 커밋 줄에 두세요')
+  const live = liveMarks(v.marks, r.commits).filter(m => !branches || m.startsWith('b:'))
+  const row = rows.find(x => x.key === v.cur)
+  const marks = live.length ? live : [targetOf(row, branches ? 'b' : 'c') || targetOf(row, 'b')].filter(Boolean)
+  if (!marks.length) return $.ui.toast(branches ? '고른 브랜치가 없습니다. b로 고르거나 커서를 브랜치가 있는 줄에 두세요' : '고른 것이 없습니다. x로 고르거나 커서를 커밋 줄에 두세요')
   const list = promptList(marks, r.commits)
   const filled = await $.prompt.fill({ text: `${say ? say(list, r.branch.split(' ')[0] || 'HEAD') : list} `, mode: 'insert' })
   if (!filled.isFilled) return $.ui.toast('입력창에 넣지 못했습니다')
@@ -193,7 +206,7 @@ async function send($: EngineInterface, say?: Say) {
 }
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
-const pressable = (r?: Row) => !!(r?.hash || r?.fold)
+const pressable = (r?: Row) => !!(r?.hash || r?.fold || r?.wip)
 
 type Win = Pick<View, 'cur' | 'off' | 'start'>
 
@@ -332,10 +345,10 @@ export const register: Register = on => {
     // 마지막 칸에 글자를 쓰면 줄이 넘어갈 수 있어 한 칸 남긴다.
     const cols = Math.max(20, e.props.bodyColumns - 1)
     const total = Math.max(4, e.props.scroll.bodyRows)
-    // 위 2줄(브랜치, 릴리스), 그래프 위아래 경계 줄 2줄, 아래 단축키 2줄과 안내 1줄, 상세 3줄. 패널이 낮으면 상세부터 뺀다.
-    const hasActions = total >= 12
-    const hasDetail = total >= 20
-    lastRows = Math.max(1, total - 4 - (hasActions ? 3 : 0) - (hasDetail ? 3 : 0))
+    // 위 2줄(브랜치, 릴리스), 그래프 위아래 경계 줄 2줄, 아래 단축키 3줄과 안내 1줄, 상세 6줄. 패널이 낮으면 상세부터 뺀다.
+    const hasActions = total >= 14
+    const hasDetail = total >= 24
+    lastRows = Math.max(1, total - 4 - (hasActions ? 4 : 0) - (hasDetail ? DETAIL_ROWS : 0))
     const focused = e.props.isFocused
 
     const seg = (s: Seg) => (
@@ -387,8 +400,24 @@ export const register: Register = on => {
     const foot: Seg[][] = []
     if (hasDetail) {
       const d = (curRow?.hash && details.get(curRow.hash)) || dState
-      if (curRow?.hash && d.h === curRow.hash && d.error) {
-        foot.push([{ t: d.h.slice(0, 7), color: 'yellow' }], [{ t: '이 커밋의 상세를 읽지 못했습니다', dim: true }], [])
+      // 파일 한 줄: 커밋은 +추가 -삭제, 작업 중 변경은 상태 두 글자. 경로가 길면 앞을 줄인다.
+      const fileLine = (lead: Seg[], path: string) => {
+        const used = width(lead.map(x => x.t).join(''))
+        return [...lead, { t: tail(path, Math.max(1, cols - used)) }]
+      }
+      const more = (n: number): Seg[] => [{ t: `외 ${n}개`, dim: true }]
+      if (curRow?.wip) {
+        const list = r.files
+        const shown = list.length > DETAIL_ROWS - 1 ? list.slice(0, DETAIL_ROWS - 2) : list
+        foot.push([{ t: `작업 중 변경 ${r.changes}개`, bold: true }])
+        for (const line of shown) {
+          const code = line.slice(0, 2)
+          const color = code.includes('?') || code.includes('A') ? 'green' : code.includes('D') ? 'red' : code.includes('R') ? 'cyan' : 'yellow'
+          foot.push(fileLine([{ t: code, color }, { t: ' ' }], line.slice(3)))
+        }
+        if (shown.length < list.length || r.changes > list.length) foot.push(more(r.changes - shown.length))
+      } else if (curRow?.hash && d.h === curRow.hash && d.error) {
+        foot.push([{ t: d.h.slice(0, 7), color: 'yellow' }], [{ t: '이 커밋의 상세를 읽지 못했습니다', dim: true }])
       } else if (curRow?.hash && d.h === curRow.hash) {
         foot.push(
           fit([{ t: d.h.slice(0, 7), color: 'yellow' }, { t: `  ${d.author}  ${ageLong(d.t, now)}`, dim: true }], [], cols),
@@ -397,14 +426,19 @@ export const register: Register = on => {
             ? [{ t: `파일 ${d.files}개  `, dim: true }, { t: `+${d.add}`, color: 'green' }, { t: '  ' }, { t: `-${d.del}`, color: 'red' }]
             : [{ t: '변경 없음', dim: true }],
         )
+        const room = DETAIL_ROWS - 3
+        const shown = d.files > room ? d.paths.slice(0, room - 1) : d.paths.slice(0, room)
+        for (const x of shown) foot.push(fileLine([{ t: `+${x.a}`, color: 'green' }, { t: ' ' }, { t: `-${x.d}`, color: 'red' }, { t: '  ' }], x.p))
+        if (d.files > shown.length) foot.push(more(d.files - shown.length))
       } else if (curRow?.hash) {
-        foot.push([{ t: '불러오는 중', dim: true }], [], [])
+        foot.push([{ t: '불러오는 중', dim: true }])
       } else if (curRow?.fold) {
         const isOpen = v.open.includes(curRow.fold)
-        foot.push(fit(curRow.label, [], cols), [{ t: isOpen ? 'Enter나 클릭으로 접기' : 'Enter나 클릭으로 펼치기', dim: true }], [])
+        foot.push(fit(curRow.label, [], cols), [{ t: isOpen ? 'Enter나 클릭으로 접기' : 'Enter나 클릭으로 펼치기', dim: true }])
       } else {
-        foot.push([{ t: '커서가 있는 커밋의 내용이 여기에 나옵니다', dim: true }], [{ t: 'x로 여러 개 고른 뒤 p나 숫자로 입력창에 넣기', dim: true }], [])
+        foot.push([{ t: '커서가 있는 커밋의 내용이 여기에 나옵니다', dim: true }], [{ t: 'x로 커밋, b로 브랜치를 고른 뒤 p나 숫자로 입력창에 넣기', dim: true }])
       }
+      while (foot.length < DETAIL_ROWS) foot.push([])
     }
     // 단축키는 패널이 키보드를 가지고 있을 때 동작한다. 고른 것이 없으면 커서가 있는 줄을 쓴다.
     const act = (hotkey: string, label: string, onPress: () => unknown) => (
@@ -452,17 +486,12 @@ export const register: Register = on => {
         {foot.map(line => <Text>{line.length ? segs(line) : ' '}</Text>)}
         {hasActions && (
           <Box flexDirection="row">
-            {act('x', '고르기', () => toggleMark($))}{gap}{act('p', '넣기', () => send($))}{gap}
-            {act('1', ACTIONS[0]!.label, () => send($, ACTIONS[0]!.say))}{gap}{act('2', ACTIONS[1]!.label, () => send($, ACTIONS[1]!.say))}
-          </Box>
-        )}
-        {hasActions && (
-          <Box flexDirection="row">
-            {act('3', ACTIONS[2]!.label, () => send($, ACTIONS[2]!.say))}{gap}{act('4', ACTIONS[3]!.label, () => send($, ACTIONS[3]!.say))}{gap}
-            {act('5', ACTIONS[4]!.label, () => send($, ACTIONS[4]!.say))}{gap}
+            {act('x', '고르기', () => toggleMark($, 'c'))}{gap}{act('b', '브랜치', () => toggleMark($, 'b'))}{gap}{act('p', '넣기', () => send($))}{gap}
             <Text dimColor>{marked ? `고른 것 ${marked}개` : '고른 것 없음'}</Text>
           </Box>
         )}
+        {hasActions && <Box flexDirection="row">{ACTIONS.slice(0, 3).flatMap(a => [act(a.hotkey, a.label, () => send($, a.say, a.branches)), gap])}</Box>}
+        {hasActions && <Box flexDirection="row">{ACTIONS.slice(3).flatMap(a => [act(a.hotkey, a.label, () => send($, a.say, a.branches)), gap])}</Box>}
         {hasActions && <Text>{segs(fit(hint, [], cols))}</Text>}
       </Box>
     )

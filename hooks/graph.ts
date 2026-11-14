@@ -18,7 +18,9 @@ export type Row = {
   age: string
   hash?: string
   fold?: string
-  // 브랜치 끝을 접은 줄이면 그 브랜치 이름(x로 브랜치를 고를 때 쓴다)
+  // 작업 중 변경(커밋하지 않은 파일) 줄
+  wip?: true
+  // 이 커밋에 붙은 브랜치(로컬 먼저, 없으면 원격). b로 브랜치를 고를 때 쓴다
   branch?: string
 }
 
@@ -26,7 +28,8 @@ export type Row = {
 // localOnly: upstream도 같은 이름의 원격 브랜치도 없는 로컬 브랜치. ahead는 그때 어느 원격에도 없는 커밋 수다.
 type Ref = { kind: 'local' | 'remote' | 'tag'; name: string; ahead?: number; behind?: number; gone?: true; localOnly?: true }
 
-export type Ctx = { track: Record<string, Track>; marks: ReadonlySet<string> }
+// wip: 커밋하지 않은 변경 파일 수. 0보다 크면 HEAD 위에 작업 중 변경 줄을 둔다.
+export type Ctx = { track: Record<string, Track>; marks: ReadonlySet<string>; wip?: number }
 
 // 터미널 테마를 따라가도록 ANSI 색 이름을 쓴다.
 export const PALETTE = ['blue', 'magenta', 'green', 'cyan', 'yellow', 'red']
@@ -118,13 +121,15 @@ function visibleRefs(commits: Commit[], track: Record<string, Track>): Map<strin
   return out
 }
 
-function chips(refs: Ref[], color: string | undefined): Seg[] {
+// marks: b로 고른 브랜치는 이름 앞에 ✓를 붙인다.
+function chips(refs: Ref[], color: string | undefined, marks: ReadonlySet<string>): Seg[] {
   return refs.flatMap((r): Seg[] => {
+    const name = marks.has(`b:${r.name}`) ? `✓ ${r.name}` : r.name
     if (r.kind === 'tag') return [{ t: `◇ ${r.name}`, color: 'yellow', bold: true }, { t: ' ' }]
-    if (r.kind === 'remote') return [{ t: r.name, color, dim: true }, { t: ' ' }]
+    if (r.kind === 'remote') return [{ t: name, color, dim: true }, { t: ' ' }]
     const sync = `${r.ahead ? `↑${r.ahead}` : ''}${r.behind ? `↓${r.behind}` : ''}`
     return [
-      { t: ` ${r.name} `, color, inverse: true, bold: true },
+      { t: ` ${name} `, color, inverse: true, bold: true },
       ...(r.localOnly ? [{ t: '로컬', dim: true as const }, ...(sync ? [{ t: ' ' }] : [])] : []),
       ...(sync ? [{ t: sync, color }] : []),
       ...(r.gone ? [{ t: '원격 삭제됨', dim: true as const }] : []),
@@ -232,77 +237,92 @@ export const ageLong = (t: number, now: number) => {
 
 const MARK: Seg = { t: '✓ ', color: 'green', bold: true }
 
-// 기본 화면(B)에 남는 커밋: HEAD, 이름표가 남은 커밋, 병합, 분기점, 첫 커밋.
+// 접어 두는 기준: 사이에 이름표도 병합도 분기도 없는 직선 구간이 LONG_RUN개 이상이면 처음 SHOW_FIRST개만 보여 준다.
+const LONG_RUN = 10
+const SHOW_FIRST = 3
+
+// 직선 구간을 끊는 커밋: HEAD, 이름표가 남은 커밋, 병합, 분기점, 첫 커밋.
 const isKey = (r: Laid) => r.isHead || r.refs.length > 0 || r.c.p.length !== 1 || r.joins.length > 0
+
+// 병합 커밋은 긴 제목 대신 들어온 브랜치나 PR 번호를 보여 준다(git 기본, Gitea, GitHub 병합 제목).
+function mergeLabel(r: Laid): Seg[] {
+  const color = PALETTE[r.colors[r.outs[0]?.lane ?? r.col]!]
+  const gitea = /^Merge pull request '(.*)' \((#\d+)\) from \S+/.exec(r.c.s)
+  if (gitea) return [{ t: 'merge ', dim: true }, { t: `${gitea[2]} `, color }, { t: gitea[1]! }]
+  const github = /^Merge pull request (#\d+) from (\S+)/.exec(r.c.s)
+  if (github) return [{ t: 'merge ', dim: true }, { t: `${github[1]} `, color }, { t: github[2]! }]
+  const branch = /^Merge branch '([^']+)'/.exec(r.c.s)
+  if (branch) return [{ t: 'merge ', dim: true }, { t: branch[1]!, color }]
+  return [{ t: r.c.s }]
+}
 
 export function buildRows(commits: Commit[], open: ReadonlySet<string>, now: number, ctx: Ctx = { track: {}, marks: new Set() }): Row[] {
   const laid = layout(commits, ctx.track)
   const width = Math.max(1, ...laid.map(r => Math.max(r.before.length, r.after.length, r.col + 1)))
   const rows: Row[] = []
-  const color = (r: Laid) => PALETTE[r.colors[r.col]!]
-  const mark = (on: boolean): Seg[] => (on ? [MARK] : [])
-  // 펼친 구간과 그 안의 커밋(A 화면): 그래프와 제목을 모두 보여 준다.
-  const full = (r: Laid): Row => ({
-    key: `c:${r.c.h}`,
-    hash: r.c.h,
-    graph: cells(r, width, r.isHead ? '◉' : '●'),
-    label: [...mark(ctx.marks.has(`c:${r.c.h}`)), ...chips(r.refs, color(r)), { t: r.c.s }],
-    age: age(r.c.t, now),
-  })
-  // 접힌 화면의 주요 커밋(B 화면): 이름표만, 없으면 병합 대상이나 짧은 해시.
-  const brief = (r: Laid): Row => {
-    // git 기본 병합 제목과 Gitea, GitHub PR 병합 제목에서 들어온 브랜치 이름을 꺼낸다.
-    const merged = /^Merge branch '([^']+)'/.exec(r.c.s)?.[1] ?? /^Merge pull request .* from (\S+)/.exec(r.c.s)?.[1]
-    const label: Seg[] = [...mark(ctx.marks.has(`c:${r.c.h}`)), ...chips(r.refs, color(r))]
-    if (r.c.p.length > 1) label.push({ t: 'merge ', dim: true }, merged ? { t: merged, color: PALETTE[r.colors[r.outs[0]?.lane ?? r.col]!] } : { t: r.c.s, dim: true })
-    else if (!r.refs.length) label.push({ t: r.c.h.slice(0, 7), dim: true })
-    return { key: `c:${r.c.h}`, hash: r.c.h, graph: cells(r, width, r.isHead ? '◉' : r.c.p.length === 0 ? '○' : '●'), label, age: age(r.c.t, now) }
+  const full = (r: Laid): Row => {
+    const branch = (r.refs.find(x => x.kind === 'local') ?? r.refs.find(x => x.kind === 'remote'))?.name
+    return {
+      key: `c:${r.c.h}`,
+      hash: r.c.h,
+      ...(branch ? { branch } : {}),
+      graph: cells(r, width, r.isHead ? '◉' : r.c.p.length === 0 ? '○' : '●'),
+      label: [
+        ...(ctx.marks.has(`c:${r.c.h}`) ? [MARK] : []),
+        ...chips(r.refs, PALETTE[r.colors[r.col]!], ctx.marks),
+        ...(r.c.p.length > 1 ? mergeLabel(r) : [{ t: r.c.s }]),
+      ],
+      age: age(r.c.t, now),
+    }
+  }
+  // HEAD 바로 위에 둔다. HEAD로 들어오는 다른 레인은 그대로 이어 그린다.
+  const wip = (head: Laid): Row => {
+    const graph: Seg[] = []
+    for (let i = 0; i < width; i++) {
+      graph.push(i === head.col ? { t: '◌', dim: true } : head.before[i] ? { t: '│', color: PALETTE[head.colors[i]!] } : { t: ' ' })
+      if (i < width - 1) graph.push({ t: ' ' })
+    }
+    return { key: 'w:wip', wip: true, graph, label: [{ t: '작업 중 변경 ', dim: true }, { t: `${ctx.wip}개`, bold: true }], age: '' }
   }
   for (let i = 0; i < laid.length; ) {
     const r = laid[i]!
-    let j = i + 1
+    if (isKey(r)) {
+      if (r.isHead && ctx.wip) rows.push(wip(r))
+      rows.push(full(r))
+      i++
+    }
+    let j = i
     while (j < laid.length && !isKey(laid[j]!)) j++
-    const run = laid.slice(i + 1, j)
-    // 브랜치 끝 뒤의 커밋이 모두 같은 레인에 있을 때만 그 브랜치의 개수로 묶는다.
-    const tipOnly = r.refs.some(x => x.kind !== 'tag') && r.c.p.length === 1 && r.joins.length === 0 && run.every(x => x.col === r.col)
-    if (!isKey(r)) {
-      // 맨 위 커밋에 이름이 없으면(목록이 잘린 경우 등) 구간으로 다룬다.
-      j = i
-      while (j < laid.length && !isKey(laid[j]!)) j++
-      pushRun(laid.slice(i, j), `r:${r.c.h}`)
-    } else if (tipOnly && run.length) {
-      const id = `t:${r.c.h}`
+    const run = laid.slice(i, j)
+    if (run.length < LONG_RUN) for (const x of run) rows.push(full(x))
+    else {
+      for (const x of run.slice(0, SHOW_FIRST)) rows.push(full(x))
+      const rest = run.slice(SHOW_FIRST)
+      const id = `r:${rest[0]!.c.h}`
       const isOpen = open.has(id)
-      const branch = (r.refs.find(x => x.kind === 'local') ?? r.refs.find(x => x.kind === 'remote'))!.name
       rows.push({
         key: `f:${id}`,
         fold: id,
-        branch,
-        graph: cells(r, width, r.isHead ? '◉' : '◆'),
-        // 펼치기 개수를 이름표 앞에 두어 긴 브랜치 이름에 잘리지 않게 한다.
-        label: [...mark(ctx.marks.has(`b:${branch}`)), { t: `${isOpen ? '▾' : '▸'} ${run.length + 1}`, underline: true }, { t: ' ' }, ...chips(r.refs, color(r))],
-        age: age(r.c.t, now),
+        graph: passing(rest[0]!, width, isOpen ? '│' : '┊'),
+        label: [{ t: isOpen ? `▾ 커밋 ${rest.length}개 접기` : `▸ 커밋 ${rest.length}개 더 보기`, underline: true }],
+        age: '',
       })
-      if (isOpen) for (const x of [r, ...run]) rows.push(full(x))
-    } else {
-      rows.push(brief(r))
-      if (run.length) pushRun(run, `r:${run[0]!.c.h}`)
+      if (isOpen) for (const x of rest) rows.push(full(x))
     }
     i = j
   }
   return rows
+}
 
-  function pushRun(run: Laid[], id: string) {
-    const isOpen = open.has(id)
-    rows.push({
-      key: `f:${id}`,
-      fold: id,
-      graph: passing(run[run.length - 1]!, width, isOpen ? '│' : '┊'),
-      label: [{ t: `${isOpen ? '▾' : '▸'} 커밋 ${run.length}개`, underline: true }],
-      age: '',
-    })
-    if (isOpen) for (const x of run) rows.push(full(x))
+// 경로가 room칸보다 길면 앞을 줄이고 끝(파일 이름 쪽)을 남긴다.
+export function tail(path: string, room: number): string {
+  if (width(path) <= room) return path
+  let t = ''
+  for (const ch of [...path].reverse()) {
+    if (width(t) + cw(ch) > room - 1) break
+    t = ch + t
   }
+  return '…' + t
 }
 
 // 태그 계열(v*, app-v* 등)마다 HEAD에서 가장 가까운 태그와, 그 뒤로 쌓인 커밋 수. 가까운 계열부터 둘까지.
