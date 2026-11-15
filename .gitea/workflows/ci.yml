@@ -36,13 +36,3 @@ jobs:
       - run: scripts/ci-release.sh
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  notify:
-    needs: [test, release]
-    if: always() && github.ref == 'refs/heads/main'
-    runs-on: host
-    steps:
-      - uses: builtin:checkout
-      - uses: https://gitea.altair823.xyz/altair823-org/ci-actions/notify@v1
-        with:
-          results: test=${{ needs.test.result }} release=${{ needs.release.result }}
