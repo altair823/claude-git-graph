@@ -306,6 +306,63 @@ test('쓰기 도구가 끝나면 바로 다시 읽고, 브랜치와 태그가 �
   expect(runs).toEqual({ status: 3, log: 2 })
 })
 
+test('맨 위를 보고 있으면 새 커밋을 따라 올라가고, 아래로 내려 보고 있으면 그 자리에 남는다', async ($, on) => {
+  let hashes = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7']
+  on('command.register', () => ({ value: { command: 'git-graph' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [{ id: 'git-graph', title: 'Git', isShown: true, isFocused: true, isPlaced: true }] }))
+  on('ui.focus', () => ({}))
+  on('clock.every', () => ({ deny: '시험에서는 타이머를 쓰지 않는다' }))
+  on('clock.after', () => ({ deny: '시험에서는 타이머를 쓰지 않는다' }))
+  on('clock.now', () => ({ value: 1700000000 * 1000 }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_, e) => {
+    const cmd = e.argv[1] === '--no-optional-locks' ? 'status' : e.argv[1]
+    const log = hashes.map((h, i) => rec(h, hashes[i + 1] ?? '', i ? '' : 'HEAD -> refs/heads/main', `커밋 ${h}`)).join('')
+    const stdout = cmd === 'status' ? '## main\n' : cmd === 'for-each-ref' ? `${hashes[0]} refs/heads/main\n` : cmd === 'rev-parse' ? '/r/kkachi\nbbb\n' : log
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('tool.call', () => ({ result: {} }))
+  // 그래프 영역이 5줄인 패널
+  const short = { ...PANE, surface: 'terminal' as const, props: { ...PANE.props, scroll: { offset: 0, bodyRows: 9 } } }
+  const screen = async () => {
+    const ui = await $.ui.mount(short)
+    const top = (await ui.find({ key: 'edge:top' }))?.text ?? ''
+    const shown = []
+    let cur = ''
+    for (const h of hashes) {
+      const row = await ui.find({ key: `c:${h}` })
+      if (row) shown.push(h)
+      if (row?.props.autoFocus) cur = h
+    }
+    await ui.unmount()
+    return { top: top.replace(/─+/g, '').trim(), shown, cur }
+  }
+  const commit = async (h: string) => {
+    hashes = [h, ...hashes]
+    await $.tool.call({ tool: 'Bash', command: 'git commit' })
+    await new Promise(r => setTimeout(r, 20))
+  }
+  const scroll = (by: number) => $.ui.scroll({ component: 'Pane', requestId: 'git-graph', offset: 0, by, bodyRows: 9, contentRows: 9, origin: { kind: 'person' } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.ui.focus({ component: 'Pane', requestId: 'git-graph', element: 'c:h2', origin: { kind: 'person' } })
+  expect(await screen()).toEqual({ top: '', shown: ['h1', 'h2', 'h3', 'h4', 'h5'], cur: 'h2' })
+  // 맨 위: 새 커밋이 보이고, 커서는 화면의 같은 자리(둘째 줄)에 남는다
+  await commit('n1')
+  expect(await screen()).toEqual({ top: '', shown: ['n1', 'h1', 'h2', 'h3', 'h4'], cur: 'h1' })
+  // 아래로 스크롤한 뒤: 보던 커밋이 그대로 보이고 위로 남은 줄 수만 늘어난다
+  await scroll(1)
+  expect(await screen()).toEqual({ top: '▲ 위로 3줄', shown: ['h3', 'h4', 'h5', 'h6', 'h7'], cur: 'h4' })
+  await commit('n2')
+  expect(await screen()).toEqual({ top: '▲ 위로 4줄', shown: ['h3', 'h4', 'h5', 'h6', 'h7'], cur: 'h4' })
+  // 다시 맨 위로 올리면 다시 따라 올라간다
+  await scroll(-1)
+  await scroll(-1)
+  await commit('n3')
+  expect(await screen()).toEqual({ top: '', shown: ['n3', 'n2', 'n1', 'h1', 'h2'], cur: 'n2' })
+})
+
 test('맨 아래 안내는 포커스 상태를 따르고, /git-graph는 패널로 포커스를 요청한다', async ($, on) => {
   const opened: unknown[] = []
   on('command.register', () => ({ value: { command: 'git-graph' } }))

@@ -96,13 +96,24 @@ async function refresh($: EngineInterface) {
       const t0 = await $.clock.now()
       const prev = await read($, repo)
       const next = await load($, prev)
-      if (JSON.stringify(next) !== JSON.stringify(prev)) await update($, repo, () => next)
+      if (JSON.stringify(next) !== JSON.stringify(prev)) await apply($, prev, next)
       lastEnd = await $.clock.now()
       cost = lastEnd - t0
     } while (again)
   } finally {
     busy = false
   }
+}
+
+// 새 이력을 적는다. 맨 위를 보고 있었으면 새 커밋이 보이도록 창을 맨 위에 두고, 커서는 화면의 같은 자리에 둔다.
+// 커서를 같은 커밋에 두면 그 줄이 화면에서 내려가는데, 터미널은 이전 자리에서 방향키를 처리해 커서가 엇나간다.
+async function apply($: EngineInterface, prev: Repo, next: Repo) {
+  const [v, before] = await Promise.all([read($, view), rowsOf($, { r: prev })])
+  const top = windowStart(before, v, lastRows) === 0
+  await update($, repo, () => next)
+  if (!top) return
+  const w = placed(await rowsOf($), v, lastRows, 0)
+  if (w.cur !== v.cur || w.off !== v.off || v.start !== 0) await moveTo($, w)
 }
 
 const isOpen = async ($: EngineInterface) => (await $.ui.panes()).some(p => p.id === PANE)
@@ -213,8 +224,8 @@ const pressable = (r?: Row) => !!(r?.hash || r?.fold || r?.wip)
 type Win = Pick<View, 'cur' | 'off' | 'start'>
 
 // 터미널은 커서를 화면의 자리로 기억하고, 방향키는 그 자리에서 한 칸 움직인다. 그래서 커서가 창 안에서 움직이는
-// 동안에는 창을 옮기지 않고, 커서 줄이 화면의 같은 자리(off)에 오도록 창의 첫 줄을 정한다. 새 커밋이 위에 생겨도
-// 커서는 같은 자리, 같은 커밋에 남는다.
+// 동안에는 창을 옮기지 않고, 커서 줄이 화면의 같은 자리(off)에 오도록 창의 첫 줄을 정한다. 아래로 스크롤한 동안에는
+// 새 커밋이 위에 생겨도 커서는 같은 자리, 같은 커밋에 남는다. 맨 위를 보고 있었으면 refresh가 창을 맨 위에 둔다.
 export function windowStart(rows: Row[], v: Win, height: number): number {
   const i = rows.findIndex(r => r.key === v.cur)
   return clamp(i >= 0 ? i - v.off : v.start, 0, Math.max(0, rows.length - height))
@@ -235,7 +246,11 @@ export function stepped(rows: Row[], v: Win, height: number, dir: 1 | -1): Win |
 
 // 창을 delta줄 옮기고, 커서는 화면의 같은 자리에서 가장 가까운 누를 수 있는 줄로 옮긴다(마우스 휠, 경계 줄 클릭).
 export function scrolled(rows: Row[], v: Win, height: number, delta: number): Win {
-  const start = clamp(windowStart(rows, v, height) + delta, 0, Math.max(0, rows.length - height))
+  return placed(rows, v, height, clamp(windowStart(rows, v, height) + delta, 0, Math.max(0, rows.length - height)))
+}
+
+// 창의 첫 줄을 start로 두고, 커서는 화면의 같은 자리에서 가장 가까운 누를 수 있는 줄로 옮긴다.
+export function placed(rows: Row[], v: Win, height: number, start: number): Win {
   const want = start + clamp(v.off, 0, height - 1)
   for (let d = 0; d < height; d++) {
     for (const k of [want + d, want - d]) {
